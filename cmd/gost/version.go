@@ -1,5 +1,5 @@
 package main
 
 const (
-	version = "20230914-dev"
+	version = "20230916-dev"
 )
