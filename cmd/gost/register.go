@@ -48,6 +48,7 @@ import (
 	_ "github.com/go-gost/x/handler/redirect/tcp"
 	_ "github.com/go-gost/x/handler/redirect/udp"
 	_ "github.com/go-gost/x/handler/relay"
+	_ "github.com/go-gost/x/handler/serial"
 	_ "github.com/go-gost/x/handler/sni"
 	_ "github.com/go-gost/x/handler/socks/v4"
 	_ "github.com/go-gost/x/handler/socks/v5"
@@ -56,6 +57,7 @@ import (
 	_ "github.com/go-gost/x/handler/sshd"
 	_ "github.com/go-gost/x/handler/tap"
 	_ "github.com/go-gost/x/handler/tun"
+	_ "github.com/go-gost/x/handler/unix"
 
 	// Register listeners
 	_ "github.com/go-gost/x/listener/dns"
@@ -78,6 +80,7 @@ import (
 	_ "github.com/go-gost/x/listener/redirect/udp"
 	_ "github.com/go-gost/x/listener/rtcp"
 	_ "github.com/go-gost/x/listener/rudp"
+	_ "github.com/go-gost/x/listener/serial"
 	_ "github.com/go-gost/x/listener/ssh"
 	_ "github.com/go-gost/x/listener/sshd"
 	_ "github.com/go-gost/x/listener/tap"
@@ -85,5 +88,6 @@ import (
 	_ "github.com/go-gost/x/listener/tls"
 	_ "github.com/go-gost/x/listener/tun"
 	_ "github.com/go-gost/x/listener/udp"
+	_ "github.com/go-gost/x/listener/unix"
 	_ "github.com/go-gost/x/listener/ws"
 )
