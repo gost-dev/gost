@@ -118,3 +118,5 @@ require (
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/go-gost/relay => github.com/gost-dev/relay v0.0.0-20230917072712-e941431d7098
