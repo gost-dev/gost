@@ -1,5 +1,5 @@
 package main
 
-const (
+var (
 	version = "20231025-dev"
 )
