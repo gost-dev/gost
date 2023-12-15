@@ -1,5 +1,5 @@
 package main
 
 var (
-	version = "20231203-dev"
+	version = "20231215-dev"
 )
