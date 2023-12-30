@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/go-gost/core/logger"
 	"github.com/go-gost/x/config"
@@ -19,8 +21,16 @@ type program struct {
 func (p *program) Init(env svc.Environment) error {
 	cfg := &config.Config{}
 	if cfgFile != "" {
-		if err := cfg.ReadFile(cfgFile); err != nil {
-			return err
+		cfgFile = strings.TrimSpace(cfgFile)
+		if strings.HasPrefix(cfgFile, "{") && strings.HasSuffix(cfgFile, "}") {
+			if err := json.Unmarshal([]byte(cfgFile), cfg); err != nil {
+				return err
+			}
+		} else {
+			if err := cfg.ReadFile(cfgFile); err != nil {
+				logger.Default().Error(err)
+				return err
+			}
 		}
 	}
 
@@ -30,7 +40,7 @@ func (p *program) Init(env svc.Environment) error {
 	}
 	cfg = p.mergeConfig(cfg, cmdCfg)
 
-	if len(cfg.Services) == 0 && apiAddr == "" {
+	if len(cfg.Services) == 0 && apiAddr == "" && cfg.API == nil {
 		if err := cfg.Load(); err != nil {
 			return err
 		}
