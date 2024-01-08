@@ -14,6 +14,7 @@ import (
 	ingress_parser "github.com/go-gost/x/config/parsing/ingress"
 	limiter_parser "github.com/go-gost/x/config/parsing/limiter"
 	logger_parser "github.com/go-gost/x/config/parsing/logger"
+	observer_parser "github.com/go-gost/x/config/parsing/observer"
 	recorder_parser "github.com/go-gost/x/config/parsing/recorder"
 	resolver_parser "github.com/go-gost/x/config/parsing/resolver"
 	router_parser "github.com/go-gost/x/config/parsing/router"
@@ -106,6 +107,13 @@ func buildService(cfg *config.Config) (services []service.Service) {
 		}
 	}
 
+	for _, observerCfg := range cfg.Observers {
+		if h := observer_parser.ParseObserver(observerCfg); h != nil {
+			if err := registry.ObserverRegistry().Register(observerCfg.Name, h); err != nil {
+				log.Fatal(err)
+			}
+		}
+	}
 	for _, recorderCfg := range cfg.Recorders {
 		if h := recorder_parser.ParseRecorder(recorderCfg); h != nil {
 			if err := registry.RecorderRegistry().Register(recorderCfg.Name, h); err != nil {
@@ -136,7 +144,7 @@ func buildService(cfg *config.Config) (services []service.Service) {
 		}
 	}
 	for _, hopCfg := range cfg.Hops {
-		hop, err := hop_parser.ParseHop(hopCfg)
+		hop, err := hop_parser.ParseHop(hopCfg, log)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -147,7 +155,7 @@ func buildService(cfg *config.Config) (services []service.Service) {
 		}
 	}
 	for _, chainCfg := range cfg.Chains {
-		c, err := chain_parser.ParseChain(chainCfg)
+		c, err := chain_parser.ParseChain(chainCfg, log)
 		if err != nil {
 			log.Fatal(err)
 		}
