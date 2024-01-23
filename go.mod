@@ -6,7 +6,7 @@ replace github.com/templexxx/cpu v0.0.7 => github.com/templexxx/cpu v0.0.10-0.20
 
 require (
 	github.com/go-gost/core v0.0.0-20240103125300-5a427b4eaf99
-	github.com/go-gost/x v0.0.0-20240103125506-c959fc2f7376
+	github.com/go-gost/x v0.0.0-20240112154622-01168e98467c
 	github.com/judwhite/go-svc v1.2.1
 )
 
@@ -71,7 +71,7 @@ require (
 	github.com/prometheus/procfs v0.11.1 // indirect
 	github.com/quic-go/qpack v0.4.0 // indirect
 	github.com/quic-go/qtls-go1-20 v0.4.1 // indirect
-	github.com/quic-go/quic-go v0.40.0 // indirect
+	github.com/quic-go/quic-go v0.40.1 // indirect
 	github.com/quic-go/webtransport-go v0.6.0 // indirect
 	github.com/riobard/go-bloom v0.0.0-20200614022211-cdc8013cb5b3 // indirect
 	github.com/rs/xid v1.3.0 // indirect
