@@ -14,7 +14,7 @@ WORKDIR /src
 
 ENV GO111MODULE=on
 
-RUN cd cmd/gost && go env && go build
+RUN cd cmd/gost && go env && go mod vendor && go build
 
 FROM alpine:latest
 
