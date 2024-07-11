@@ -8,7 +8,9 @@ import (
 	"github.com/go-gost/core/chain"
 	"github.com/go-gost/core/hop"
 	"github.com/go-gost/core/logger"
+	mdutil "github.com/go-gost/core/metadata/util"
 	"github.com/go-gost/x/config"
+	"github.com/go-gost/x/config/parsing"
 	bypass_parser "github.com/go-gost/x/config/parsing/bypass"
 	node_parser "github.com/go-gost/x/config/parsing/node"
 	selector_parser "github.com/go-gost/x/config/parsing/selector"
@@ -16,6 +18,7 @@ import (
 	hop_plugin "github.com/go-gost/x/hop/plugin"
 	"github.com/go-gost/x/internal/loader"
 	"github.com/go-gost/x/internal/plugin"
+	"github.com/go-gost/x/metadata"
 )
 
 func ParseHop(cfg *config.HopConfig, log logger.Logger) (hop.Hop, error) {
@@ -47,6 +50,16 @@ func ParseHop(cfg *config.HopConfig, log logger.Logger) (hop.Hop, error) {
 		}
 	}
 
+	ifce := cfg.Interface
+	var netns string
+	if cfg.Metadata != nil {
+		md := metadata.NewMetadata(cfg.Metadata)
+		if v := mdutil.GetString(md, parsing.MDKeyInterface); v != "" {
+			ifce = v
+		}
+		netns = mdutil.GetString(md, "netns")
+	}
+
 	var nodes []*chain.Node
 	for _, v := range cfg.Nodes {
 		if v == nil {
@@ -60,22 +73,28 @@ func ParseHop(cfg *config.HopConfig, log logger.Logger) (hop.Hop, error) {
 			v.Hosts = cfg.Hosts
 		}
 		if v.Interface == "" {
-			v.Interface = cfg.Interface
+			v.Interface = ifce
 		}
+		if v.Netns == "" {
+			v.Netns = netns
+		}
+
 		if v.SockOpts == nil {
 			v.SockOpts = cfg.SockOpts
 		}
 
 		if v.Connector == nil {
-			v.Connector = &config.ConnectorConfig{
-				Type: "http",
-			}
+			v.Connector = &config.ConnectorConfig{}
+		}
+		if strings.TrimSpace(v.Connector.Type) == "" {
+			v.Connector.Type = "http"
 		}
 
 		if v.Dialer == nil {
-			v.Dialer = &config.DialerConfig{
-				Type: "tcp",
-			}
+			v.Dialer = &config.DialerConfig{}
+		}
+		if strings.TrimSpace(v.Dialer.Type) == "" {
+			v.Dialer.Type = "tcp"
 		}
 
 		node, err := node_parser.ParseNode(cfg.Name, v, log)

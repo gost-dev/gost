@@ -2,7 +2,9 @@ package service
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
+	"time"
 
 	"github.com/go-gost/core/admission"
 	"github.com/go-gost/core/auth"
@@ -13,6 +15,7 @@ import (
 	"github.com/go-gost/core/listener"
 	"github.com/go-gost/core/logger"
 	mdutil "github.com/go-gost/core/metadata/util"
+	"github.com/go-gost/core/observer/stats"
 	"github.com/go-gost/core/recorder"
 	"github.com/go-gost/core/selector"
 	"github.com/go-gost/core/service"
@@ -25,26 +28,25 @@ import (
 	hop_parser "github.com/go-gost/x/config/parsing/hop"
 	logger_parser "github.com/go-gost/x/config/parsing/logger"
 	selector_parser "github.com/go-gost/x/config/parsing/selector"
-	xnet "github.com/go-gost/x/internal/net"
 	tls_util "github.com/go-gost/x/internal/util/tls"
 	"github.com/go-gost/x/metadata"
 	"github.com/go-gost/x/registry"
 	xservice "github.com/go-gost/x/service"
-	"github.com/go-gost/x/stats"
+	"github.com/vishvananda/netns"
 )
 
 func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 	if cfg.Listener == nil {
 		cfg.Listener = &config.ListenerConfig{}
 	}
-	if lt := strings.TrimSpace(cfg.Listener.Type); lt == "" {
+	if strings.TrimSpace(cfg.Listener.Type) == "" {
 		cfg.Listener.Type = "tcp"
 	}
 
 	if cfg.Handler == nil {
 		cfg.Handler = &config.HandlerConfig{}
 	}
-	if ht := strings.TrimSpace(cfg.Handler.Type); ht == "" {
+	if strings.TrimSpace(cfg.Handler.Type) == "" {
 		cfg.Handler.Type = "auto"
 	}
 
@@ -60,17 +62,13 @@ func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 		"handler":  cfg.Handler.Type,
 	})
 
-	listenerLogger := serviceLogger.WithFields(map[string]any{
-		"kind": "listener",
-	})
-
 	tlsCfg := cfg.Listener.TLS
 	if tlsCfg == nil {
 		tlsCfg = &config.TLSConfig{}
 	}
 	tlsConfig, err := tls_util.LoadServerConfig(tlsCfg)
 	if err != nil {
-		listenerLogger.Error(err)
+		serviceLogger.Error(err)
 		return nil, err
 	}
 	if tlsConfig == nil {
@@ -102,6 +100,9 @@ func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 	var preUp, preDown, postUp, postDown []string
 	var ignoreChain bool
 	var pStats *stats.Stats
+	var observePeriod time.Duration
+	var netnsIn, netnsOut string
+	var dialTimeout time.Duration
 	if cfg.Metadata != nil {
 		md := metadata.NewMetadata(cfg.Metadata)
 		ppv = mdutil.GetInt(md, parsing.MDKeyProxyProtocol)
@@ -122,25 +123,72 @@ func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 		if mdutil.GetBool(md, parsing.MDKeyEnableStats) {
 			pStats = &stats.Stats{}
 		}
+		observePeriod = mdutil.GetDuration(md, "observePeriod")
+		netnsIn = mdutil.GetString(md, "netns")
+		netnsOut = mdutil.GetString(md, "netns.out")
+		dialTimeout = mdutil.GetDuration(md, "dialTimeout")
+	}
+
+	listenerLogger := serviceLogger.WithFields(map[string]any{
+		"kind": "listener",
+	})
+
+	routerOpts := []chain.RouterOption{
+		chain.TimeoutRouterOption(dialTimeout),
+		chain.InterfaceRouterOption(ifce),
+		chain.NetnsRouterOption(netnsOut),
+		chain.SockOptsRouterOption(sockOpts),
+		chain.ResolverRouterOption(registry.ResolverRegistry().Get(cfg.Resolver)),
+		chain.HostMapperRouterOption(registry.HostsRegistry().Get(cfg.Hosts)),
+		chain.LoggerRouterOption(listenerLogger),
+	}
+	if !ignoreChain {
+		routerOpts = append(routerOpts,
+			chain.ChainRouterOption(chainGroup(cfg.Listener.Chain, cfg.Listener.ChainGroup)),
+		)
 	}
 
 	listenOpts := []listener.Option{
 		listener.AddrOption(cfg.Addr),
+		listener.RouterOption(xchain.NewRouter(routerOpts...)),
 		listener.AutherOption(auther),
 		listener.AuthOption(auth_parser.Info(cfg.Listener.Auth)),
 		listener.TLSConfigOption(tlsConfig),
 		listener.AdmissionOption(admission.AdmissionGroup(admissions...)),
 		listener.TrafficLimiterOption(registry.TrafficLimiterRegistry().Get(cfg.Limiter)),
 		listener.ConnLimiterOption(registry.ConnLimiterRegistry().Get(cfg.CLimiter)),
-		listener.LoggerOption(listenerLogger),
 		listener.ServiceOption(cfg.Name),
 		listener.ProxyProtocolOption(ppv),
 		listener.StatsOption(pStats),
+		listener.NetnsOption(netnsIn),
+		listener.LoggerOption(listenerLogger),
 	}
-	if !ignoreChain {
-		listenOpts = append(listenOpts,
-			listener.ChainOption(chainGroup(cfg.Listener.Chain, cfg.Listener.ChainGroup)),
-		)
+
+	if netnsIn != "" {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+
+		originNs, err := netns.Get()
+		if err != nil {
+			return nil, fmt.Errorf("netns.Get(): %v", err)
+		}
+		defer netns.Set(originNs)
+
+		var ns netns.NsHandle
+
+		if strings.HasPrefix(netnsIn, "/") {
+			ns, err = netns.GetFromPath(netnsIn)
+		} else {
+			ns, err = netns.GetFromName(netnsIn)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("netns.Get(%s): %v", netnsIn, err)
+		}
+		defer ns.Close()
+
+		if err := netns.Set(ns); err != nil {
+			return nil, fmt.Errorf("netns.Set(%s): %v", netnsIn, err)
+		}
 	}
 
 	var ln listener.Listener
@@ -202,10 +250,11 @@ func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 		})
 	}
 
-	routerOpts := []chain.RouterOption{
+	routerOpts = []chain.RouterOption{
 		chain.RetriesRouterOption(cfg.Handler.Retries),
-		// chain.TimeoutRouterOption(10*time.Second),
+		chain.TimeoutRouterOption(dialTimeout),
 		chain.InterfaceRouterOption(ifce),
+		chain.NetnsRouterOption(netnsOut),
 		chain.SockOptsRouterOption(sockOpts),
 		chain.ResolverRouterOption(registry.ResolverRegistry().Get(cfg.Resolver)),
 		chain.HostMapperRouterOption(registry.HostsRegistry().Get(cfg.Hosts)),
@@ -217,12 +266,11 @@ func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 			chain.ChainRouterOption(chainGroup(cfg.Handler.Chain, cfg.Handler.ChainGroup)),
 		)
 	}
-	router := chain.NewRouter(routerOpts...)
 
 	var h handler.Handler
 	if rf := registry.HandlerRegistry().Get(cfg.Handler.Type); rf != nil {
 		h = rf(
-			handler.RouterOption(router),
+			handler.RouterOption(xchain.NewRouter(routerOpts...)),
 			handler.AutherOption(auther),
 			handler.AuthOption(auth_parser.Info(cfg.Handler.Auth)),
 			handler.BypassOption(bypass.BypassGroup(bypass_parser.List(cfg.Bypass, cfg.Bypasses...)...)),
@@ -232,6 +280,7 @@ func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 			handler.ObserverOption(registry.ObserverRegistry().Get(cfg.Handler.Observer)),
 			handler.LoggerOption(handlerLogger),
 			handler.ServiceOption(cfg.Name),
+			handler.NetnsOption(netnsIn),
 		)
 	} else {
 		return nil, fmt.Errorf("unknown handler: %s", cfg.Handler.Type)
@@ -263,6 +312,7 @@ func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 		xservice.RecordersOption(recorders...),
 		xservice.StatsOption(pStats),
 		xservice.ObserverOption(registry.ObserverRegistry().Get(cfg.Observer)),
+		xservice.ObservePeriodOption(observePeriod),
 		xservice.LoggerOption(serviceLogger),
 	)
 
@@ -288,50 +338,41 @@ func parseForwarder(cfg *config.ForwarderConfig, log logger.Logger) (hop.Hop, er
 		Selector: cfg.Selector,
 	}
 	for _, node := range cfg.Nodes {
-		if node != nil {
-			addrs := xnet.AddrPortRange(node.Addr).Addrs()
-			if len(addrs) == 0 {
-				addrs = append(addrs, node.Addr)
-			}
-			for i, addr := range addrs {
-				name := node.Name
-				if i > 0 {
-					name = fmt.Sprintf("%s-%d", node.Name, i)
-				}
+		if node == nil {
+			continue
+		}
 
-				filter := node.Filter
-				if filter == nil {
-					if node.Protocol != "" || node.Host != "" || node.Path != "" {
-						filter = &config.NodeFilterConfig{
-							Protocol: node.Protocol,
-							Host:     node.Host,
-							Path:     node.Path,
-						}
-					}
+		filter := node.Filter
+		if filter == nil {
+			if node.Protocol != "" || node.Host != "" || node.Path != "" {
+				filter = &config.NodeFilterConfig{
+					Protocol: node.Protocol,
+					Host:     node.Host,
+					Path:     node.Path,
 				}
-
-				httpCfg := node.HTTP
-				if node.Auth != nil {
-					if httpCfg == nil {
-						httpCfg = &config.HTTPNodeConfig{}
-					}
-					if httpCfg.Auth == nil {
-						httpCfg.Auth = node.Auth
-					}
-				}
-				hc.Nodes = append(hc.Nodes, &config.NodeConfig{
-					Name:     name,
-					Addr:     addr,
-					Network:  node.Network,
-					Bypass:   node.Bypass,
-					Bypasses: node.Bypasses,
-					Filter:   filter,
-					HTTP:     httpCfg,
-					TLS:      node.TLS,
-					Metadata: node.Metadata,
-				})
 			}
 		}
+
+		httpCfg := node.HTTP
+		if node.Auth != nil {
+			if httpCfg == nil {
+				httpCfg = &config.HTTPNodeConfig{}
+			}
+			if httpCfg.Auth == nil {
+				httpCfg.Auth = node.Auth
+			}
+		}
+		hc.Nodes = append(hc.Nodes, &config.NodeConfig{
+			Name:     node.Name,
+			Addr:     node.Addr,
+			Network:  node.Network,
+			Bypass:   node.Bypass,
+			Bypasses: node.Bypasses,
+			Filter:   filter,
+			HTTP:     httpCfg,
+			TLS:      node.TLS,
+			Metadata: node.Metadata,
+		})
 	}
 	return hop_parser.ParseHop(&hc, log)
 }

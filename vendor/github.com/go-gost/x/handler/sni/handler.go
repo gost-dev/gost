@@ -13,10 +13,10 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"strings"
 	"time"
 
 	"github.com/go-gost/core/bypass"
-	"github.com/go-gost/core/chain"
 	"github.com/go-gost/core/handler"
 	"github.com/go-gost/core/logger"
 	md "github.com/go-gost/core/metadata"
@@ -32,7 +32,6 @@ func init() {
 }
 
 type sniHandler struct {
-	router  *chain.Router
 	md      metadata
 	options handler.Options
 }
@@ -53,11 +52,6 @@ func NewHandler(opts ...handler.Option) handler.Handler {
 func (h *sniHandler) Init(md md.Metadata) (err error) {
 	if err = h.parseMetadata(md); err != nil {
 		return
-	}
-
-	h.router = h.options.Router
-	if h.router == nil {
-		h.router = chain.NewRouter(chain.LoggerRouterOption(h.options.Logger))
 	}
 
 	return nil
@@ -112,7 +106,7 @@ func (h *sniHandler) handleHTTP(ctx context.Context, rw io.ReadWriter, raddr net
 
 	host := req.Host
 	if _, _, err := net.SplitHostPort(host); err != nil {
-		host = net.JoinHostPort(host, "80")
+		host = net.JoinHostPort(strings.Trim(host, "[]"), "80")
 	}
 	log = log.WithFields(map[string]any{
 		"host": host,
@@ -128,7 +122,7 @@ func (h *sniHandler) handleHTTP(ctx context.Context, rw io.ReadWriter, raddr net
 		ctx = ctxvalue.ContextWithHash(ctx, &ctxvalue.Hash{Source: host})
 	}
 
-	cc, err := h.router.Dial(ctx, "tcp", host)
+	cc, err := h.options.Router.Dial(ctx, "tcp", host)
 	if err != nil {
 		log.Error(err)
 		return err
@@ -178,7 +172,7 @@ func (h *sniHandler) handleHTTPS(ctx context.Context, rw io.ReadWriter, raddr ne
 	}
 
 	if _, _, err := net.SplitHostPort(host); err != nil {
-		host = net.JoinHostPort(host, "443")
+		host = net.JoinHostPort(strings.Trim(host, "[]"), "443")
 	}
 
 	log = log.WithFields(map[string]any{
@@ -196,7 +190,7 @@ func (h *sniHandler) handleHTTPS(ctx context.Context, rw io.ReadWriter, raddr ne
 		ctx = ctxvalue.ContextWithHash(ctx, &ctxvalue.Hash{Source: host})
 	}
 
-	cc, err := h.router.Dial(ctx, "tcp", host)
+	cc, err := h.options.Router.Dial(ctx, "tcp", host)
 	if err != nil {
 		log.Error(err)
 		return err

@@ -11,8 +11,8 @@ import (
 	icmp_pkg "github.com/go-gost/x/internal/util/icmp"
 	limiter "github.com/go-gost/x/limiter/traffic/wrapper"
 	metrics "github.com/go-gost/x/metrics/wrapper"
+	stats "github.com/go-gost/x/observer/stats/wrapper"
 	"github.com/go-gost/x/registry"
-	stats "github.com/go-gost/x/stats/wrapper"
 	"github.com/quic-go/quic-go"
 	"golang.org/x/net/icmp"
 )
@@ -73,7 +73,7 @@ func (l *icmpListener) Init(md md.Metadata) (err error) {
 	}
 
 	tlsCfg := l.options.TLSConfig
-	tlsCfg.NextProtos = []string{"http/3", "quic/v1"}
+	tlsCfg.NextProtos = []string{"h3", "quic/v1"}
 
 	ln, err := quic.ListenEarly(conn, tlsCfg, config)
 	if err != nil {

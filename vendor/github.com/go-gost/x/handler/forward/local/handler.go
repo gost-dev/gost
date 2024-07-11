@@ -37,7 +37,6 @@ func init() {
 
 type forwardHandler struct {
 	hop     hop.Hop
-	router  *chain.Router
 	md      metadata
 	options handler.Options
 }
@@ -56,11 +55,6 @@ func NewHandler(opts ...handler.Option) handler.Handler {
 func (h *forwardHandler) Init(md md.Metadata) (err error) {
 	if err = h.parseMetadata(md); err != nil {
 		return
-	}
-
-	h.router = h.options.Router
-	if h.router == nil {
-		h.router = chain.NewRouter(chain.LoggerRouterOption(h.options.Logger))
 	}
 
 	return
@@ -116,7 +110,7 @@ func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...hand
 	}
 
 	if _, _, err := net.SplitHostPort(host); err != nil {
-		host = net.JoinHostPort(host, "0")
+		host = net.JoinHostPort(strings.Trim(host, "[]"), "0")
 	}
 
 	var target *chain.Node
@@ -157,7 +151,7 @@ func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...hand
 
 	log.Debugf("%s >> %s", conn.RemoteAddr(), addr)
 
-	cc, err := h.router.Dial(ctx, network, addr)
+	cc, err := h.options.Router.Dial(ctx, network, addr)
 	if err != nil {
 		log.Error(err)
 		// TODO: the router itself may be failed due to the failed node in the router,
@@ -208,7 +202,7 @@ func (h *forwardHandler) handleHTTP(ctx context.Context, rw io.ReadWriter, remot
 
 			host := req.Host
 			if _, _, err := net.SplitHostPort(host); err != nil {
-				host = net.JoinHostPort(host, "80")
+				host = net.JoinHostPort(strings.Trim(host, "[]"), "80")
 			}
 			if bp := h.options.Bypass; bp != nil && bp.Contains(ctx, "tcp", host, bypass.WithPathOption(req.RequestURI)) {
 				log.Debugf("bypass: %s %s", host, req.RequestURI)
@@ -277,7 +271,7 @@ func (h *forwardHandler) handleHTTP(ctx context.Context, rw io.ReadWriter, remot
 				}
 			}
 
-			cc, err = h.router.Dial(ctx, "tcp", target.Addr)
+			cc, err = h.options.Router.Dial(ctx, "tcp", target.Addr)
 			if err != nil {
 				// TODO: the router itself may be failed due to the failed node in the router,
 				// the dead marker may be a wrong operation.

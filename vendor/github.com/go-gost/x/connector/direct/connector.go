@@ -39,14 +39,22 @@ func (c *directConnector) Connect(ctx context.Context, _ net.Conn, network, addr
 		opt(&cOpts)
 	}
 
-	conn, err := cOpts.NetDialer.Dial(ctx, network, address)
+	conn, err := cOpts.Dialer.Dial(ctx, network, address)
 	if err != nil {
 		return nil, err
 	}
 
+	var localAddr, remoteAddr string
+	if addr := conn.LocalAddr(); addr != nil {
+		localAddr = addr.String()
+	}
+	if addr := conn.RemoteAddr(); addr != nil {
+		remoteAddr = addr.String()
+	}
+
 	log := c.options.Logger.WithFields(map[string]any{
-		"remote":  conn.RemoteAddr().String(),
-		"local":   conn.LocalAddr().String(),
+		"remote":  remoteAddr,
+		"local":   localAddr,
 		"network": network,
 		"address": address,
 	})

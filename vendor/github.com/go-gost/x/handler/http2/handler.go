@@ -18,19 +18,18 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-gost/core/chain"
 	"github.com/go-gost/core/handler"
 	"github.com/go-gost/core/limiter/traffic"
 	"github.com/go-gost/core/logger"
 	md "github.com/go-gost/core/metadata"
+	"github.com/go-gost/core/observer/stats"
 	ctxvalue "github.com/go-gost/x/ctx"
 	xio "github.com/go-gost/x/internal/io"
 	netpkg "github.com/go-gost/x/internal/net"
 	stats_util "github.com/go-gost/x/internal/util/stats"
 	"github.com/go-gost/x/limiter/traffic/wrapper"
+	stats_wrapper "github.com/go-gost/x/observer/stats/wrapper"
 	"github.com/go-gost/x/registry"
-	"github.com/go-gost/x/stats"
-	stats_wrapper "github.com/go-gost/x/stats/wrapper"
 )
 
 func init() {
@@ -38,7 +37,6 @@ func init() {
 }
 
 type http2Handler struct {
-	router  *chain.Router
 	md      metadata
 	options handler.Options
 	stats   *stats_util.HandlerStats
@@ -60,11 +58,6 @@ func NewHandler(opts ...handler.Option) handler.Handler {
 func (h *http2Handler) Init(md md.Metadata) error {
 	if err := h.parseMetadata(md); err != nil {
 		return err
-	}
-
-	h.router = h.options.Router
-	if h.router == nil {
-		h.router = chain.NewRouter(chain.LoggerRouterOption(h.options.Logger))
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -139,7 +132,7 @@ func (h *http2Handler) roundTrip(ctx context.Context, w http.ResponseWriter, req
 
 	addr := req.Host
 	if _, port, _ := net.SplitHostPort(addr); port == "" {
-		addr = net.JoinHostPort(addr, "80")
+		addr = net.JoinHostPort(strings.Trim(addr, "[]"), "80")
 	}
 
 	fields := map[string]any{
@@ -188,7 +181,7 @@ func (h *http2Handler) roundTrip(ctx context.Context, w http.ResponseWriter, req
 		ctx = ctxvalue.ContextWithHash(ctx, &ctxvalue.Hash{Source: addr})
 	}
 
-	cc, err := h.router.Dial(ctx, "tcp", addr)
+	cc, err := h.options.Router.Dial(ctx, "tcp", addr)
 	if err != nil {
 		log.Error(err)
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -419,7 +412,11 @@ func (h *http2Handler) observeStats(ctx context.Context) {
 		return
 	}
 
-	ticker := time.NewTicker(5 * time.Second)
+	d := h.md.observePeriod
+	if d < time.Millisecond {
+		d = 5 * time.Second
+	}
+	ticker := time.NewTicker(d)
 	defer ticker.Stop()
 
 	for {

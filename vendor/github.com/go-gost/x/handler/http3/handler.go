@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"strings"
 	"time"
 
 	"github.com/go-gost/core/chain"
@@ -24,7 +25,6 @@ func init() {
 
 type http3Handler struct {
 	hop     hop.Hop
-	router  *chain.Router
 	md      metadata
 	options handler.Options
 }
@@ -43,11 +43,6 @@ func NewHandler(opts ...handler.Option) handler.Handler {
 func (h *http3Handler) Init(md md.Metadata) error {
 	if err := h.parseMetadata(md); err != nil {
 		return err
-	}
-
-	h.router = h.options.Router
-	if h.router == nil {
-		h.router = chain.NewRouter(chain.LoggerRouterOption(h.options.Logger))
 	}
 
 	return nil
@@ -94,7 +89,7 @@ func (h *http3Handler) Handle(ctx context.Context, conn net.Conn, opts ...handle
 func (h *http3Handler) roundTrip(ctx context.Context, w http.ResponseWriter, req *http.Request, log logger.Logger) error {
 	addr := req.Host
 	if _, port, _ := net.SplitHostPort(addr); port == "" {
-		addr = net.JoinHostPort(addr, "80")
+		addr = net.JoinHostPort(strings.Trim(addr, "[]"), "80")
 	}
 
 	if log.IsLevelEnabled(logger.TraceLevel) {
@@ -147,7 +142,7 @@ func (h *http3Handler) roundTrip(ctx context.Context, w http.ResponseWriter, req
 			TLSHandshakeTimeout:   10 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				conn, err := h.router.Dial(ctx, network, target.Addr)
+				conn, err := h.options.Router.Dial(ctx, network, target.Addr)
 				if err != nil {
 					log.Error(err)
 					// TODO: the router itself may be failed due to the failed node in the router,

@@ -3,6 +3,7 @@ package quic
 import (
 	"context"
 	"net"
+	"strings"
 
 	"github.com/go-gost/core/listener"
 	"github.com/go-gost/core/logger"
@@ -12,8 +13,8 @@ import (
 	quic_util "github.com/go-gost/x/internal/util/quic"
 	limiter "github.com/go-gost/x/limiter/traffic/wrapper"
 	metrics "github.com/go-gost/x/metrics/wrapper"
+	stats "github.com/go-gost/x/observer/stats/wrapper"
 	"github.com/go-gost/x/registry"
-	stats "github.com/go-gost/x/stats/wrapper"
 	"github.com/quic-go/quic-go"
 )
 
@@ -48,15 +49,14 @@ func (l *quicListener) Init(md md.Metadata) (err error) {
 
 	addr := l.options.Addr
 	if _, _, err := net.SplitHostPort(addr); err != nil {
-		addr = net.JoinHostPort(addr, "0")
+		addr = net.JoinHostPort(strings.Trim(addr, "[]"), "0")
 	}
 
 	network := "udp"
-	if xnet.IsIPv4(l.options.Addr) {
+	if xnet.IsIPv4(addr) {
 		network = "udp4"
 	}
-	var laddr *net.UDPAddr
-	laddr, err = net.ResolveUDPAddr(network, addr)
+	laddr, err := net.ResolveUDPAddr(network, addr)
 	if err != nil {
 		return
 	}
@@ -82,7 +82,7 @@ func (l *quicListener) Init(md md.Metadata) (err error) {
 	}
 
 	tlsCfg := l.options.TLSConfig
-	tlsCfg.NextProtos = []string{"http/3", "quic/v1"}
+	tlsCfg.NextProtos = []string{"h3", "quic/v1"}
 
 	ln, err := quic.ListenEarly(conn, tlsCfg, config)
 	if err != nil {

@@ -6,19 +6,18 @@ import (
 	"net"
 	"time"
 
-	"github.com/go-gost/core/chain"
 	"github.com/go-gost/core/handler"
 	"github.com/go-gost/core/limiter/traffic"
 	"github.com/go-gost/core/logger"
 	md "github.com/go-gost/core/metadata"
+	"github.com/go-gost/core/observer/stats"
 	"github.com/go-gost/gosocks4"
 	ctxvalue "github.com/go-gost/x/ctx"
 	netpkg "github.com/go-gost/x/internal/net"
-	"github.com/go-gost/x/limiter/traffic/wrapper"
-	"github.com/go-gost/x/registry"
 	stats_util "github.com/go-gost/x/internal/util/stats"
-	"github.com/go-gost/x/stats"
-	stats_wrapper "github.com/go-gost/x/stats/wrapper"
+	"github.com/go-gost/x/limiter/traffic/wrapper"
+	stats_wrapper "github.com/go-gost/x/observer/stats/wrapper"
+	"github.com/go-gost/x/registry"
 )
 
 var (
@@ -32,7 +31,6 @@ func init() {
 }
 
 type socks4Handler struct {
-	router  *chain.Router
 	md      metadata
 	options handler.Options
 	stats   *stats_util.HandlerStats
@@ -54,11 +52,6 @@ func NewHandler(opts ...handler.Option) handler.Handler {
 func (h *socks4Handler) Init(md md.Metadata) (err error) {
 	if err := h.parseMetadata(md); err != nil {
 		return err
-	}
-
-	h.router = h.options.Router
-	if h.router == nil {
-		h.router = chain.NewRouter(chain.LoggerRouterOption(h.options.Logger))
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -154,7 +147,7 @@ func (h *socks4Handler) handleConnect(ctx context.Context, conn net.Conn, req *g
 		ctx = ctxvalue.ContextWithHash(ctx, &ctxvalue.Hash{Source: addr})
 	}
 
-	cc, err := h.router.Dial(ctx, "tcp", addr)
+	cc, err := h.options.Router.Dial(ctx, "tcp", addr)
 	if err != nil {
 		resp := gosocks4.NewReply(gosocks4.Failed, nil)
 		log.Trace(resp)
@@ -218,7 +211,11 @@ func (h *socks4Handler) observeStats(ctx context.Context) {
 		return
 	}
 
-	ticker := time.NewTicker(5 * time.Second)
+	d := h.md.observePeriod
+	if d < time.Millisecond {
+		d = 5 * time.Second
+	}
+	ticker := time.NewTicker(d)
 	defer ticker.Stop()
 
 	for {

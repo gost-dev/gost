@@ -16,15 +16,16 @@ import (
 
 type Options struct {
 	Bypass      bypass.Bypass
-	Router      *chain.Router
+	Router      chain.Router
 	Auth        *url.Userinfo
 	Auther      auth.Authenticator
 	RateLimiter rate.RateLimiter
 	Limiter     traffic.TrafficLimiter
 	TLSConfig   *tls.Config
 	Logger      logger.Logger
-	Observer observer.Observer
+	Observer    observer.Observer
 	Service     string
+	Netns       string
 }
 
 type Option func(opts *Options)
@@ -35,7 +36,7 @@ func BypassOption(bypass bypass.Bypass) Option {
 	}
 }
 
-func RouterOption(router *chain.Router) Option {
+func RouterOption(router chain.Router) Option {
 	return func(opts *Options) {
 		opts.Router = router
 	}
@@ -86,6 +87,12 @@ func ObserverOption(observer observer.Observer) Option {
 func ServiceOption(service string) Option {
 	return func(opts *Options) {
 		opts.Service = service
+	}
+}
+
+func NetnsOption(netns string) Option {
+	return func(opts *Options) {
+		opts.Netns = netns
 	}
 }
 

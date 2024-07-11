@@ -79,14 +79,14 @@ func (d *http3Dialer) Dial(ctx context.Context, addr string, opts ...dialer.Dial
 							return nil, err
 						}
 
-						udpConn, err := options.NetDialer.Dial(ctx, "udp", "")
+						udpConn, err := options.Dialer.Dial(ctx, "udp", "")
 						if err != nil {
 							return nil, err
 						}
 
 						return quic.DialEarly(context.Background(), udpConn.(net.PacketConn), udpAddr, tlsCfg, cfg)
 					},
-					QuicConfig: &quic.Config{
+					QUICConfig: &quic.Config{
 						KeepAlivePeriod:      d.md.keepAlivePeriod,
 						HandshakeIdleTimeout: d.md.handshakeTimeout,
 						MaxIdleTimeout:       d.md.maxIdleTimeout,

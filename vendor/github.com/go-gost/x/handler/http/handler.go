@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -17,18 +18,17 @@ import (
 	"time"
 
 	"github.com/asaskevich/govalidator"
-	"github.com/go-gost/core/chain"
 	"github.com/go-gost/core/handler"
 	traffic "github.com/go-gost/core/limiter/traffic"
 	"github.com/go-gost/core/logger"
 	md "github.com/go-gost/core/metadata"
+	"github.com/go-gost/core/observer/stats"
 	ctxvalue "github.com/go-gost/x/ctx"
 	netpkg "github.com/go-gost/x/internal/net"
 	stats_util "github.com/go-gost/x/internal/util/stats"
 	traffic_wrapper "github.com/go-gost/x/limiter/traffic/wrapper"
+	stats_wrapper "github.com/go-gost/x/observer/stats/wrapper"
 	"github.com/go-gost/x/registry"
-	"github.com/go-gost/x/stats"
-	stats_wrapper "github.com/go-gost/x/stats/wrapper"
 )
 
 func init() {
@@ -36,7 +36,6 @@ func init() {
 }
 
 type httpHandler struct {
-	router  *chain.Router
 	md      metadata
 	options handler.Options
 	stats   *stats_util.HandlerStats
@@ -58,11 +57,6 @@ func NewHandler(opts ...handler.Option) handler.Handler {
 func (h *httpHandler) Init(md md.Metadata) error {
 	if err := h.parseMetadata(md); err != nil {
 		return err
-	}
-
-	h.router = h.options.Router
-	if h.router == nil {
-		h.router = chain.NewRouter(chain.LoggerRouterOption(h.options.Logger))
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -142,13 +136,13 @@ func (h *httpHandler) handleRequest(ctx context.Context, conn net.Conn, req *htt
 
 	addr := req.Host
 	if _, port, _ := net.SplitHostPort(addr); port == "" {
-		addr = net.JoinHostPort(addr, "80")
+		addr = net.JoinHostPort(strings.Trim(addr, "[]"), "80")
 	}
 
 	fields := map[string]any{
 		"dst": addr,
 	}
-	if u, _, _ := h.basicProxyAuth(req.Header.Get("Proxy-Authorization"), log); u != "" {
+	if u, _, _ := h.basicProxyAuth(req.Header.Get("Proxy-Authorization")); u != "" {
 		fields["user"] = u
 	}
 	log = log.WithFields(fields)
@@ -160,12 +154,17 @@ func (h *httpHandler) handleRequest(ctx context.Context, conn net.Conn, req *htt
 	log.Debugf("%s >> %s", conn.RemoteAddr(), addr)
 
 	resp := &http.Response{
-		ProtoMajor: 1,
-		ProtoMinor: 1,
-		Header:     h.md.header,
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Header:        h.md.header,
+		ContentLength: -1,
 	}
 	if resp.Header == nil {
 		resp.Header = http.Header{}
+	}
+
+	if resp.Header.Get("Proxy-Agent") == "" {
+		resp.Header.Set("Proxy-Agent", h.md.proxyAgent)
 	}
 
 	clientID, ok := h.authenticate(ctx, conn, req, resp, log)
@@ -209,7 +208,7 @@ func (h *httpHandler) handleRequest(ctx context.Context, conn net.Conn, req *htt
 		ctx = ctxvalue.ContextWithHash(ctx, &ctxvalue.Hash{Source: addr})
 	}
 
-	cc, err := h.router.Dial(ctx, network, addr)
+	cc, err := h.options.Router.Dial(ctx, network, addr)
 	if err != nil {
 		resp.StatusCode = http.StatusServiceUnavailable
 
@@ -221,26 +220,6 @@ func (h *httpHandler) handleRequest(ctx context.Context, conn net.Conn, req *htt
 		return err
 	}
 	defer cc.Close()
-
-	if req.Method == http.MethodConnect {
-		resp.StatusCode = http.StatusOK
-		resp.Status = "200 Connection established"
-
-		if log.IsLevelEnabled(logger.TraceLevel) {
-			dump, _ := httputil.DumpResponse(resp, false)
-			log.Trace(string(dump))
-		}
-		if err = resp.Write(conn); err != nil {
-			log.Error(err)
-			return err
-		}
-	} else {
-		req.Header.Del("Proxy-Connection")
-		if err = req.Write(cc); err != nil {
-			log.Error(err)
-			return err
-		}
-	}
 
 	rw := traffic_wrapper.WrapReadWriter(h.options.Limiter, conn,
 		traffic.NetworkOption(network),
@@ -256,6 +235,22 @@ func (h *httpHandler) handleRequest(ctx context.Context, conn net.Conn, req *htt
 		rw = stats_wrapper.WrapReadWriter(rw, pstats)
 	}
 
+	if req.Method != http.MethodConnect {
+		return h.handleProxy(rw, cc, req, log)
+	}
+
+	resp.StatusCode = http.StatusOK
+	resp.Status = "200 Connection established"
+
+	if log.IsLevelEnabled(logger.TraceLevel) {
+		dump, _ := httputil.DumpResponse(resp, false)
+		log.Trace(string(dump))
+	}
+	if err = resp.Write(rw); err != nil {
+		log.Error(err)
+		return err
+	}
+
 	start := time.Now()
 	log.Infof("%s <-> %s", conn.RemoteAddr(), addr)
 	netpkg.Transport(rw, cc)
@@ -264,6 +259,49 @@ func (h *httpHandler) handleRequest(ctx context.Context, conn net.Conn, req *htt
 	}).Infof("%s >-< %s", conn.RemoteAddr(), addr)
 
 	return nil
+}
+
+func (h *httpHandler) handleProxy(rw, cc io.ReadWriter, req *http.Request, log logger.Logger) (err error) {
+	req.Header.Del("Proxy-Connection")
+
+	if err = req.Write(cc); err != nil {
+		log.Error(err)
+		return err
+	}
+
+	ch := make(chan error, 1)
+
+	go func() {
+		ch <- netpkg.CopyBuffer(rw, cc, 32*1024)
+	}()
+
+	for {
+		err := func() error {
+			req, err := http.ReadRequest(bufio.NewReader(rw))
+			if err != nil {
+				return err
+			}
+
+			if log.IsLevelEnabled(logger.TraceLevel) {
+				dump, _ := httputil.DumpRequest(req, false)
+				log.Trace(string(dump))
+			}
+
+			req.Header.Del("Proxy-Connection")
+
+			if err = req.Write(cc); err != nil {
+				return err
+			}
+			return nil
+		}()
+		ch <- err
+
+		if err != nil {
+			break
+		}
+	}
+
+	return <-ch
 }
 
 func (h *httpHandler) decodeServerName(s string) (string, error) {
@@ -284,7 +322,7 @@ func (h *httpHandler) decodeServerName(s string) (string, error) {
 	return string(v), nil
 }
 
-func (h *httpHandler) basicProxyAuth(proxyAuth string, log logger.Logger) (username, password string, ok bool) {
+func (h *httpHandler) basicProxyAuth(proxyAuth string) (username, password string, ok bool) {
 	if proxyAuth == "" {
 		return
 	}
@@ -306,7 +344,7 @@ func (h *httpHandler) basicProxyAuth(proxyAuth string, log logger.Logger) (usern
 }
 
 func (h *httpHandler) authenticate(ctx context.Context, conn net.Conn, req *http.Request, resp *http.Response, log logger.Logger) (id string, ok bool) {
-	u, p, _ := h.basicProxyAuth(req.Header.Get("Proxy-Authorization"), log)
+	u, p, _ := h.basicProxyAuth(req.Header.Get("Proxy-Authorization"))
 	if h.options.Auther == nil {
 		return "", true
 	}
@@ -412,7 +450,11 @@ func (h *httpHandler) observeStats(ctx context.Context) {
 		return
 	}
 
-	ticker := time.NewTicker(5 * time.Second)
+	d := h.md.observePeriod
+	if d < time.Millisecond {
+		d = 5 * time.Second
+	}
+	ticker := time.NewTicker(d)
 	defer ticker.Stop()
 
 	for {
