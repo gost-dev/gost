@@ -117,3 +117,11 @@ all-arch: $(PLATFORM_LIST) $(WINDOWS_ARCH_LIST)
 releases: $(gz_releases) $(zip_releases)
 clean:
 	rm $(BINDIR)/*
+
+merge-master:
+	git merge origin/master --no-commit
+
+before-build:
+	go mod vendor
+	go mod tidy
+	go vet ./...
