@@ -1,22 +1,31 @@
 package v4
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"net"
 	"time"
 
 	"github.com/go-gost/core/handler"
+	"github.com/go-gost/core/limiter"
 	"github.com/go-gost/core/limiter/traffic"
 	"github.com/go-gost/core/logger"
 	md "github.com/go-gost/core/metadata"
 	"github.com/go-gost/core/observer/stats"
+	"github.com/go-gost/core/recorder"
 	"github.com/go-gost/gosocks4"
 	ctxvalue "github.com/go-gost/x/ctx"
+	xio "github.com/go-gost/x/internal/io"
 	netpkg "github.com/go-gost/x/internal/net"
+	limiter_util "github.com/go-gost/x/internal/util/limiter"
+	"github.com/go-gost/x/internal/util/sniffing"
 	stats_util "github.com/go-gost/x/internal/util/stats"
-	"github.com/go-gost/x/limiter/traffic/wrapper"
+	rate_limiter "github.com/go-gost/x/limiter/rate"
+	traffic_wrapper "github.com/go-gost/x/limiter/traffic/wrapper"
 	stats_wrapper "github.com/go-gost/x/observer/stats/wrapper"
+	xrecorder "github.com/go-gost/x/recorder"
 	"github.com/go-gost/x/registry"
 )
 
@@ -31,10 +40,12 @@ func init() {
 }
 
 type socks4Handler struct {
-	md      metadata
-	options handler.Options
-	stats   *stats_util.HandlerStats
-	cancel  context.CancelFunc
+	md       metadata
+	options  handler.Options
+	stats    *stats_util.HandlerStats
+	limiter  traffic.TrafficLimiter
+	cancel   context.CancelFunc
+	recorder recorder.RecorderObject
 }
 
 func NewHandler(opts ...handler.Option) handler.Handler {
@@ -45,7 +56,6 @@ func NewHandler(opts ...handler.Option) handler.Handler {
 
 	return &socks4Handler{
 		options: options,
-		stats:   stats_util.NewHandlerStats(options.Service),
 	}
 }
 
@@ -58,31 +68,60 @@ func (h *socks4Handler) Init(md md.Metadata) (err error) {
 	h.cancel = cancel
 
 	if h.options.Observer != nil {
+		h.stats = stats_util.NewHandlerStats(h.options.Service)
 		go h.observeStats(ctx)
+	}
+
+	if limiter := h.options.Limiter; limiter != nil {
+		h.limiter = limiter_util.NewCachedTrafficLimiter(limiter, 30*time.Second, 60*time.Second)
+	}
+
+	for _, ro := range h.options.Recorders {
+		if ro.Record == xrecorder.RecorderServiceHandler {
+			h.recorder = ro
+			break
+		}
 	}
 
 	return nil
 }
 
-func (h *socks4Handler) Handle(ctx context.Context, conn net.Conn, opts ...handler.HandleOption) error {
+func (h *socks4Handler) Handle(ctx context.Context, conn net.Conn, opts ...handler.HandleOption) (err error) {
 	defer conn.Close()
 
 	start := time.Now()
 
+	ro := &xrecorder.HandlerRecorderObject{
+		Service:    h.options.Service,
+		Network:    "tcp",
+		RemoteAddr: conn.RemoteAddr().String(),
+		LocalAddr:  conn.LocalAddr().String(),
+		Time:       start,
+		SID:        string(ctxvalue.SidFromContext(ctx)),
+	}
+	ro.ClientIP, _, _ = net.SplitHostPort(conn.RemoteAddr().String())
+
 	log := h.options.Logger.WithFields(map[string]any{
 		"remote": conn.RemoteAddr().String(),
 		"local":  conn.LocalAddr().String(),
+		"sid":    ctxvalue.SidFromContext(ctx),
 	})
 
 	log.Infof("%s <> %s", conn.RemoteAddr(), conn.LocalAddr())
 	defer func() {
+		if err != nil {
+			ro.Err = err.Error()
+		}
+		ro.Duration = time.Since(start)
+		ro.Record(ctx, h.recorder.Recorder)
+
 		log.WithFields(map[string]any{
 			"duration": time.Since(start),
 		}).Infof("%s >< %s", conn.RemoteAddr(), conn.LocalAddr())
 	}()
 
 	if !h.checkRateLimit(conn.RemoteAddr()) {
-		return nil
+		return rate_limiter.ErrRateLimit
 	}
 
 	if h.md.readTimeout > 0 {
@@ -94,23 +133,26 @@ func (h *socks4Handler) Handle(ctx context.Context, conn net.Conn, opts ...handl
 		log.Error(err)
 		return err
 	}
+
+	ro.Host = req.Addr.String()
 	log.Trace(req)
 
 	conn.SetReadDeadline(time.Time{})
 
 	if h.options.Auther != nil {
-		id, ok := h.options.Auther.Authenticate(ctx, string(req.Userid), "")
+		clientID, ok := h.options.Auther.Authenticate(ctx, string(req.Userid), "")
 		if !ok {
 			resp := gosocks4.NewReply(gosocks4.RejectedUserid, nil)
 			log.Trace(resp)
 			return resp.Write(conn)
 		}
-		ctx = ctxvalue.ContextWithClientID(ctx, ctxvalue.ClientID(id))
+		ctx = ctxvalue.ContextWithClientID(ctx, ctxvalue.ClientID(clientID))
+		ro.ClientID = clientID
 	}
 
 	switch req.Cmd {
 	case gosocks4.CmdConnect:
-		return h.handleConnect(ctx, conn, req, log)
+		return h.handleConnect(ctx, conn, req, ro, log)
 	case gosocks4.CmdBind:
 		return h.handleBind(ctx, conn, req)
 	default:
@@ -127,7 +169,7 @@ func (h *socks4Handler) Close() error {
 	return nil
 }
 
-func (h *socks4Handler) handleConnect(ctx context.Context, conn net.Conn, req *gosocks4.Request, log logger.Logger) error {
+func (h *socks4Handler) handleConnect(ctx context.Context, conn net.Conn, req *gosocks4.Request, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
 	addr := req.Addr.String()
 
 	log = log.WithFields(map[string]any{
@@ -147,14 +189,15 @@ func (h *socks4Handler) handleConnect(ctx context.Context, conn net.Conn, req *g
 		ctx = ctxvalue.ContextWithHash(ctx, &ctxvalue.Hash{Source: addr})
 	}
 
-	cc, err := h.options.Router.Dial(ctx, "tcp", addr)
+	var buf bytes.Buffer
+	cc, err := h.options.Router.Dial(ctxvalue.ContextWithBuffer(ctx, &buf), "tcp", addr)
+	ro.Route = buf.String()
 	if err != nil {
 		resp := gosocks4.NewReply(gosocks4.Failed, nil)
 		log.Trace(resp)
 		resp.Write(conn)
 		return err
 	}
-
 	defer cc.Close()
 
 	resp := gosocks4.NewReply(gosocks4.Granted, nil)
@@ -165,11 +208,16 @@ func (h *socks4Handler) handleConnect(ctx context.Context, conn net.Conn, req *g
 	}
 
 	clientID := ctxvalue.ClientIDFromContext(ctx)
-	rw := wrapper.WrapReadWriter(h.options.Limiter, conn,
-		traffic.NetworkOption("tcp"),
-		traffic.AddrOption(addr),
-		traffic.ClientOption(string(clientID)),
-		traffic.SrcOption(conn.RemoteAddr().String()),
+	rw := traffic_wrapper.WrapReadWriter(
+		h.limiter,
+		conn,
+		string(clientID),
+		limiter.ScopeOption(limiter.ScopeClient),
+		limiter.ServiceOption(h.options.Service),
+		limiter.NetworkOption("tcp"),
+		limiter.AddrOption(addr),
+		limiter.ClientOption(string(clientID)),
+		limiter.SrcOption(conn.RemoteAddr().String()),
 	)
 	if h.options.Observer != nil {
 		pstats := h.stats.Stats(string(clientID))
@@ -177,6 +225,31 @@ func (h *socks4Handler) handleConnect(ctx context.Context, conn net.Conn, req *g
 		pstats.Add(stats.KindCurrentConns, 1)
 		defer pstats.Add(stats.KindCurrentConns, -1)
 		rw = stats_wrapper.WrapReadWriter(rw, pstats)
+	}
+
+	if h.md.sniffing {
+		if h.md.sniffingTimeout > 0 {
+			conn.SetReadDeadline(time.Now().Add(h.md.sniffingTimeout))
+		}
+
+		br := bufio.NewReader(conn)
+		proto, _ := sniffing.Sniff(ctx, br)
+		ro.Proto = proto
+
+		if h.md.sniffingTimeout > 0 {
+			conn.SetReadDeadline(time.Time{})
+		}
+
+		rw = xio.NewReadWriter(br, conn)
+		switch proto {
+		case sniffing.ProtoHTTP:
+			ro2 := &xrecorder.HandlerRecorderObject{}
+			*ro2 = *ro
+			ro.Time = time.Time{}
+			return h.handleHTTP(ctx, rw, cc, ro2, log)
+		case sniffing.ProtoTLS:
+			return h.handleTLS(ctx, rw, cc, ro, log)
+		}
 	}
 
 	t := time.Now()

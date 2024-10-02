@@ -3,6 +3,7 @@ package bypass
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"strings"
@@ -13,6 +14,10 @@ import (
 	"github.com/go-gost/core/logger"
 	"github.com/go-gost/x/internal/loader"
 	"github.com/go-gost/x/internal/matcher"
+)
+
+var (
+	ErrBypass = errors.New("bypass")
 )
 
 type options struct {
@@ -266,8 +271,8 @@ func (bp *localBypass) matched(addr string) bool {
 		host = addr
 	}
 
-	if ip := net.ParseIP(host); ip != nil {
-		return bp.cidrMatcher.Match(host)
+	if ip := net.ParseIP(host); ip != nil && bp.cidrMatcher.Match(host) {
+		return true
 	}
 
 	return bp.wildcardMatcher.Match(addr)

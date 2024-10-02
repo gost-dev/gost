@@ -1,6 +1,8 @@
 package ss
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"io"
 	"net"
@@ -8,10 +10,15 @@ import (
 
 	"github.com/go-gost/core/handler"
 	md "github.com/go-gost/core/metadata"
+	"github.com/go-gost/core/recorder"
 	"github.com/go-gost/gosocks5"
 	ctxvalue "github.com/go-gost/x/ctx"
+	xio "github.com/go-gost/x/internal/io"
 	netpkg "github.com/go-gost/x/internal/net"
+	"github.com/go-gost/x/internal/util/sniffing"
 	"github.com/go-gost/x/internal/util/ss"
+	rate_limiter "github.com/go-gost/x/limiter/rate"
+	xrecorder "github.com/go-gost/x/recorder"
 	"github.com/go-gost/x/registry"
 	"github.com/shadowsocks/go-shadowsocks2/core"
 )
@@ -21,9 +28,10 @@ func init() {
 }
 
 type ssHandler struct {
-	cipher  core.Cipher
-	md      metadata
-	options handler.Options
+	cipher   core.Cipher
+	md       metadata
+	options  handler.Options
+	recorder recorder.RecorderObject
 }
 
 func NewHandler(opts ...handler.Option) handler.Handler {
@@ -50,36 +58,61 @@ func (h *ssHandler) Init(md md.Metadata) (err error) {
 		}
 	}
 
+	for _, ro := range h.options.Recorders {
+		if ro.Record == xrecorder.RecorderServiceHandler {
+			h.recorder = ro
+			break
+		}
+	}
+
 	return
 }
 
-func (h *ssHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler.HandleOption) error {
+func (h *ssHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler.HandleOption) (err error) {
 	defer conn.Close()
 
 	start := time.Now()
+
+	ro := &xrecorder.HandlerRecorderObject{
+		Service:    h.options.Service,
+		Network:    "tcp",
+		RemoteAddr: conn.RemoteAddr().String(),
+		LocalAddr:  conn.LocalAddr().String(),
+		Time:       start,
+		SID:        string(ctxvalue.SidFromContext(ctx)),
+	}
+	ro.ClientIP, _, _ = net.SplitHostPort(conn.RemoteAddr().String())
+
 	log := h.options.Logger.WithFields(map[string]any{
 		"remote": conn.RemoteAddr().String(),
 		"local":  conn.LocalAddr().String(),
+		"sid":    ctxvalue.SidFromContext(ctx),
 	})
 
 	log.Infof("%s <> %s", conn.RemoteAddr(), conn.LocalAddr())
 	defer func() {
+		if !ro.Time.IsZero() {
+			if err != nil {
+				ro.Err = err.Error()
+			}
+			ro.Duration = time.Since(start)
+			ro.Record(ctx, h.recorder.Recorder)
+		}
+
 		log.WithFields(map[string]any{
 			"duration": time.Since(start),
 		}).Infof("%s >< %s", conn.RemoteAddr(), conn.LocalAddr())
 	}()
 
 	if !h.checkRateLimit(conn.RemoteAddr()) {
-		return nil
+		return rate_limiter.ErrRateLimit
 	}
 
 	if h.cipher != nil {
 		conn = ss.ShadowConn(h.cipher.StreamConn(conn), nil)
 	}
 
-	if h.md.readTimeout > 0 {
-		conn.SetReadDeadline(time.Now().Add(h.md.readTimeout))
-	}
+	conn.SetReadDeadline(time.Now().Add(h.md.readTimeout))
 
 	addr := &gosocks5.Addr{}
 	if _, err := addr.ReadFrom(conn); err != nil {
@@ -87,6 +120,9 @@ func (h *ssHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler.H
 		io.Copy(io.Discard, conn)
 		return err
 	}
+	ro.Host = addr.String()
+
+	conn.SetReadDeadline(time.Time{})
 
 	log = log.WithFields(map[string]any{
 		"dst": addr.String(),
@@ -104,15 +140,43 @@ func (h *ssHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler.H
 		ctx = ctxvalue.ContextWithHash(ctx, &ctxvalue.Hash{Source: addr.String()})
 	}
 
-	cc, err := h.options.Router.Dial(ctx, "tcp", addr.String())
+	var buf bytes.Buffer
+	cc, err := h.options.Router.Dial(ctxvalue.ContextWithBuffer(ctx, &buf), "tcp", addr.String())
+	ro.Route = buf.String()
 	if err != nil {
 		return err
 	}
 	defer cc.Close()
 
+	var rw io.ReadWriter = conn
+	if h.md.sniffing {
+		if h.md.sniffingTimeout > 0 {
+			conn.SetReadDeadline(time.Now().Add(h.md.sniffingTimeout))
+		}
+
+		br := bufio.NewReader(conn)
+		proto, _ := sniffing.Sniff(ctx, br)
+		ro.Proto = proto
+
+		if h.md.sniffingTimeout > 0 {
+			conn.SetReadDeadline(time.Time{})
+		}
+
+		rw = xio.NewReadWriter(br, conn)
+		switch proto {
+		case sniffing.ProtoHTTP:
+			ro2 := &xrecorder.HandlerRecorderObject{}
+			*ro2 = *ro
+			ro.Time = time.Time{}
+			return h.handleHTTP(ctx, rw, cc, ro2, log)
+		case sniffing.ProtoTLS:
+			return h.handleTLS(ctx, rw, cc, ro, log)
+		}
+	}
+
 	t := time.Now()
 	log.Infof("%s <-> %s", conn.RemoteAddr(), addr)
-	netpkg.Transport(conn, cc)
+	netpkg.Transport(rw, cc)
 	log.WithFields(map[string]any{
 		"duration": time.Since(t),
 	}).Infof("%s >-< %s", conn.RemoteAddr(), addr)

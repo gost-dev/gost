@@ -121,6 +121,7 @@ type TLSOptions struct {
 	MinVersion   string   `yaml:"minVersion,omitempty" json:"minVersion,omitempty"`
 	MaxVersion   string   `yaml:"maxVersion,omitempty" json:"maxVersion,omitempty"`
 	CipherSuites []string `yaml:"cipherSuites,omitempty" json:"cipherSuites,omitempty"`
+	ALPN         []string `yaml:"alpn,omitempty" json:"alpn,omitempty"`
 }
 
 type PluginConfig struct {
@@ -185,6 +186,7 @@ type FileLoader struct {
 type RedisLoader struct {
 	Addr     string `json:"addr"`
 	DB       int    `yaml:",omitempty" json:"db,omitempty"`
+	Username string `yaml:",omitempty" json:"username,omitempty"`
 	Password string `yaml:",omitempty" json:"password,omitempty"`
 	Key      string `yaml:",omitempty" json:"key,omitempty"`
 	Type     string `yaml:",omitempty" json:"type,omitempty"`
@@ -284,13 +286,15 @@ type TCPRecorder struct {
 }
 
 type HTTPRecorder struct {
-	URL     string        `json:"url" yaml:"url"`
-	Timeout time.Duration `json:"timeout"`
+	URL     string            `yaml:"url" json:"url"`
+	Timeout time.Duration     `yaml:",omitempty" json:"timeout,omitempty"`
+	Header  map[string]string `yaml:",omitempty" json:"header,omitempty"`
 }
 
 type RedisRecorder struct {
 	Addr     string `json:"addr"`
 	DB       int    `yaml:",omitempty" json:"db,omitempty"`
+	Username string `yaml:",omitempty" json:"username,omitempty"`
 	Password string `yaml:",omitempty" json:"password,omitempty"`
 	Key      string `yaml:",omitempty" json:"key,omitempty"`
 	Type     string `yaml:",omitempty" json:"type,omitempty"`

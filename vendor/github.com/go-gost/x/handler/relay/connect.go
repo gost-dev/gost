@@ -1,6 +1,8 @@
 package relay
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -8,18 +10,22 @@ import (
 	"net"
 	"time"
 
-	"github.com/go-gost/core/limiter/traffic"
+	"github.com/go-gost/core/limiter"
 	"github.com/go-gost/core/logger"
 	"github.com/go-gost/core/observer/stats"
 	"github.com/go-gost/relay"
+	xbypass "github.com/go-gost/x/bypass"
 	ctxvalue "github.com/go-gost/x/ctx"
 	xnet "github.com/go-gost/x/internal/net"
 	serial "github.com/go-gost/x/internal/util/serial"
-	"github.com/go-gost/x/limiter/traffic/wrapper"
+	xio "github.com/go-gost/x/internal/io"
+	"github.com/go-gost/x/internal/util/sniffing"
+	traffic_wrapper "github.com/go-gost/x/limiter/traffic/wrapper"
 	stats_wrapper "github.com/go-gost/x/observer/stats/wrapper"
+	xrecorder "github.com/go-gost/x/recorder"
 )
 
-func (h *relayHandler) handleConnect(ctx context.Context, conn net.Conn, network, address string, log logger.Logger) (err error) {
+func (h *relayHandler) handleConnect(ctx context.Context, conn net.Conn, network, address string, ro *xrecorder.HandlerRecorderObject, log logger.Logger) (err error) {
 	if network == "unix" || network == "serial" {
 		if host, _, _ := net.SplitHostPort(address); host != "" {
 			address = host
@@ -49,8 +55,8 @@ func (h *relayHandler) handleConnect(ctx context.Context, conn net.Conn, network
 	if h.options.Bypass != nil && h.options.Bypass.Contains(ctx, network, address) {
 		log.Debug("bypass: ", address)
 		resp.Status = relay.StatusForbidden
-		_, err = resp.WriteTo(conn)
-		return
+		resp.WriteTo(conn)
+		return xbypass.ErrBypass
 	}
 
 	switch h.md.hash {
@@ -59,14 +65,15 @@ func (h *relayHandler) handleConnect(ctx context.Context, conn net.Conn, network
 	}
 
 	var cc io.ReadWriteCloser
-
 	switch network {
 	case "unix":
 		cc, err = (&net.Dialer{}).DialContext(ctx, "unix", address)
 	case "serial":
 		cc, err = serial.OpenPort(serial.ParseConfigFromAddr(address))
 	default:
-		cc, err = h.options.Router.Dial(ctx, network, address)
+		var buf bytes.Buffer
+		cc, err = h.options.Router.Dial(ctxvalue.ContextWithBuffer(ctx, &buf), network, address)
+		ro.Route = buf.String()
 	}
 	if err != nil {
 		resp.Status = relay.StatusNetworkUnreachable
@@ -108,11 +115,16 @@ func (h *relayHandler) handleConnect(ctx context.Context, conn net.Conn, network
 	}
 
 	clientID := ctxvalue.ClientIDFromContext(ctx)
-	rw := wrapper.WrapReadWriter(h.options.Limiter, conn,
-		traffic.NetworkOption(network),
-		traffic.AddrOption(address),
-		traffic.ClientOption(string(clientID)),
-		traffic.SrcOption(conn.RemoteAddr().String()),
+	rw := traffic_wrapper.WrapReadWriter(
+		h.limiter,
+		conn,
+		string(clientID),
+		limiter.ScopeOption(limiter.ScopeClient),
+		limiter.ServiceOption(h.options.Service),
+		limiter.NetworkOption(network),
+		limiter.AddrOption(address),
+		limiter.ClientOption(string(clientID)),
+		limiter.SrcOption(conn.RemoteAddr().String()),
 	)
 	if h.options.Observer != nil {
 		pstats := h.stats.Stats(string(clientID))
@@ -120,6 +132,31 @@ func (h *relayHandler) handleConnect(ctx context.Context, conn net.Conn, network
 		pstats.Add(stats.KindCurrentConns, 1)
 		defer pstats.Add(stats.KindCurrentConns, -1)
 		rw = stats_wrapper.WrapReadWriter(rw, pstats)
+	}
+
+	if h.md.sniffing {
+		if h.md.sniffingTimeout > 0 {
+			conn.SetReadDeadline(time.Now().Add(h.md.sniffingTimeout))
+		}
+
+		br := bufio.NewReader(conn)
+		proto, _ := sniffing.Sniff(ctx, br)
+		ro.Proto = proto
+
+		if h.md.sniffingTimeout > 0 {
+			conn.SetReadDeadline(time.Time{})
+		}
+
+		rw = xio.NewReadWriter(br, conn)
+		switch proto {
+		case sniffing.ProtoHTTP:
+			ro2 := &xrecorder.HandlerRecorderObject{}
+			*ro2 = *ro
+			ro.Time = time.Time{}
+			return h.handleHTTP(ctx, rw, cc, ro2, log)
+		case sniffing.ProtoTLS:
+			return h.handleTLS(ctx, rw, cc, ro, log)
+		}
 	}
 
 	t := time.Now()

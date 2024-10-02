@@ -1,10 +1,13 @@
 package ssh
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"time"
@@ -12,8 +15,15 @@ import (
 	"github.com/go-gost/core/handler"
 	"github.com/go-gost/core/logger"
 	md "github.com/go-gost/core/metadata"
+	"github.com/go-gost/core/recorder"
+	xbypass "github.com/go-gost/x/bypass"
+	ctxvalue "github.com/go-gost/x/ctx"
+	xio "github.com/go-gost/x/internal/io"
 	netpkg "github.com/go-gost/x/internal/net"
+	"github.com/go-gost/x/internal/util/sniffing"
 	sshd_util "github.com/go-gost/x/internal/util/sshd"
+	rate_limiter "github.com/go-gost/x/limiter/rate"
+	xrecorder "github.com/go-gost/x/recorder"
 	"github.com/go-gost/x/registry"
 	"golang.org/x/crypto/ssh"
 )
@@ -28,8 +38,9 @@ func init() {
 }
 
 type forwardHandler struct {
-	md      metadata
-	options handler.Options
+	md       metadata
+	options  handler.Options
+	recorder recorder.RecorderObject
 }
 
 func NewHandler(opts ...handler.Option) handler.Handler {
@@ -48,26 +59,59 @@ func (h *forwardHandler) Init(md md.Metadata) (err error) {
 		return
 	}
 
+	for _, ro := range h.options.Recorders {
+		if ro.Record == xrecorder.RecorderServiceHandler {
+			h.recorder = ro
+			break
+		}
+	}
+
 	return nil
 }
 
-func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler.HandleOption) error {
+func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler.HandleOption) (err error) {
 	defer conn.Close()
+
+	start := time.Now()
+
+	ro := &xrecorder.HandlerRecorderObject{
+		Service:    h.options.Service,
+		Network:    "tcp",
+		RemoteAddr: conn.RemoteAddr().String(),
+		LocalAddr:  conn.LocalAddr().String(),
+		Time:       start,
+		SID:        string(ctxvalue.SidFromContext(ctx)),
+	}
+	ro.ClientIP, _, _ = net.SplitHostPort(conn.RemoteAddr().String())
 
 	log := h.options.Logger.WithFields(map[string]any{
 		"remote": conn.RemoteAddr().String(),
 		"local":  conn.LocalAddr().String(),
+		"sid":    ctxvalue.SidFromContext(ctx),
 	})
 
+	log.Infof("%s <> %s", conn.RemoteAddr(), conn.LocalAddr())
+	defer func() {
+		if err != nil {
+			ro.Err = err.Error()
+		}
+		ro.Duration = time.Since(start)
+		ro.Record(ctx, h.recorder.Recorder)
+
+		log.WithFields(map[string]any{
+			"duration": time.Since(start),
+		}).Infof("%s >< %s", conn.RemoteAddr(), conn.LocalAddr())
+	}()
+
 	if !h.checkRateLimit(conn.RemoteAddr()) {
-		return nil
+		return rate_limiter.ErrRateLimit
 	}
 
 	switch cc := conn.(type) {
 	case *sshd_util.DirectForwardConn:
-		return h.handleDirectForward(ctx, cc, log)
+		return h.handleDirectForward(ctx, cc, ro, log)
 	case *sshd_util.RemoteForwardConn:
-		return h.handleRemoteForward(ctx, cc, log)
+		return h.handleRemoteForward(ctx, cc, ro, log)
 	default:
 		err := errors.New("sshd: wrong connection type")
 		log.Error(err)
@@ -75,9 +119,10 @@ func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...hand
 	}
 }
 
-func (h *forwardHandler) handleDirectForward(ctx context.Context, conn *sshd_util.DirectForwardConn, log logger.Logger) error {
+func (h *forwardHandler) handleDirectForward(ctx context.Context, conn *sshd_util.DirectForwardConn, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
 	targetAddr := conn.DstAddr()
 
+	ro.Host = targetAddr
 	log = log.WithFields(map[string]any{
 		"dst": fmt.Sprintf("%s/%s", targetAddr, "tcp"),
 		"cmd": "connect",
@@ -87,18 +132,46 @@ func (h *forwardHandler) handleDirectForward(ctx context.Context, conn *sshd_uti
 
 	if h.options.Bypass != nil && h.options.Bypass.Contains(ctx, "tcp", targetAddr) {
 		log.Debugf("bypass %s", targetAddr)
-		return nil
+		return xbypass.ErrBypass
 	}
 
-	cc, err := h.options.Router.Dial(ctx, "tcp", targetAddr)
+	var buf bytes.Buffer
+	cc, err := h.options.Router.Dial(ctxvalue.ContextWithBuffer(ctx, &buf), "tcp", targetAddr)
+	ro.Route = buf.String()
 	if err != nil {
 		return err
 	}
 	defer cc.Close()
 
+	var rw io.ReadWriter = conn
+	if h.md.sniffing {
+		if h.md.sniffingTimeout > 0 {
+			conn.SetReadDeadline(time.Now().Add(h.md.sniffingTimeout))
+		}
+
+		br := bufio.NewReader(conn)
+		proto, _ := sniffing.Sniff(ctx, br)
+		ro.Proto = proto
+
+		if h.md.sniffingTimeout > 0 {
+			conn.SetReadDeadline(time.Time{})
+		}
+
+		rw = xio.NewReadWriter(br, conn)
+		switch proto {
+		case sniffing.ProtoHTTP:
+			ro2 := &xrecorder.HandlerRecorderObject{}
+			*ro2 = *ro
+			ro.Time = time.Time{}
+			return h.handleHTTP(ctx, rw, cc, ro2, log)
+		case sniffing.ProtoTLS:
+			return h.handleTLS(ctx, rw, cc, ro, log)
+		}
+	}
+
 	t := time.Now()
 	log.Infof("%s <-> %s", cc.LocalAddr(), targetAddr)
-	netpkg.Transport(conn, cc)
+	netpkg.Transport(rw, cc)
 	log.WithFields(map[string]any{
 		"duration": time.Since(t),
 	}).Infof("%s >-< %s", cc.LocalAddr(), targetAddr)
@@ -106,7 +179,7 @@ func (h *forwardHandler) handleDirectForward(ctx context.Context, conn *sshd_uti
 	return nil
 }
 
-func (h *forwardHandler) handleRemoteForward(ctx context.Context, conn *sshd_util.RemoteForwardConn, log logger.Logger) error {
+func (h *forwardHandler) handleRemoteForward(ctx context.Context, conn *sshd_util.RemoteForwardConn, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
 	req := conn.Request()
 
 	t := tcpipForward{}
@@ -117,6 +190,7 @@ func (h *forwardHandler) handleRemoteForward(ctx context.Context, conn *sshd_uti
 
 	network := "tcp"
 	addr := net.JoinHostPort(t.Host, strconv.Itoa(int(t.Port)))
+	ro.Host = addr
 
 	log = log.WithFields(map[string]any{
 		"dst": fmt.Sprintf("%s/%s", addr, network),

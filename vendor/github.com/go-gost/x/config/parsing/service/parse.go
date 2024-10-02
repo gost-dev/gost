@@ -246,6 +246,8 @@ func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 				Direction:       mdutil.GetBool(md, parsing.MDKeyRecorderDirection),
 				TimestampFormat: mdutil.GetString(md, parsing.MDKeyRecorderTimestampFormat),
 				Hexdump:         mdutil.GetBool(md, parsing.MDKeyRecorderHexdump),
+				HTTPBody:        mdutil.GetBool(md, parsing.MDKeyRecorderHTTPBody),
+				MaxBodySize:     mdutil.GetInt(md, parsing.MDKeyRecorderHTTPMaxBodySize),
 			},
 		})
 	}
@@ -278,6 +280,7 @@ func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 			handler.RateLimiterOption(registry.RateLimiterRegistry().Get(cfg.RLimiter)),
 			handler.TrafficLimiterOption(registry.TrafficLimiterRegistry().Get(cfg.Handler.Limiter)),
 			handler.ObserverOption(registry.ObserverRegistry().Get(cfg.Handler.Observer)),
+			handler.RecordersOption(recorders...),
 			handler.LoggerOption(handlerLogger),
 			handler.ServiceOption(cfg.Name),
 			handler.NetnsOption(netnsIn),
