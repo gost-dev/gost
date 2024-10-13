@@ -8,6 +8,15 @@ import (
 	"github.com/go-gost/core/metadata"
 )
 
+func IsExists(md metadata.Metadata, keys ...string) bool {
+	for _, key := range keys {
+		if md.IsExists(key) {
+			return true
+		}
+	}
+	return false
+}
+
 func GetBool(md metadata.Metadata, keys ...string) (v bool) {
 	if md == nil {
 		return

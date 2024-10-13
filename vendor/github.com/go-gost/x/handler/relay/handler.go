@@ -11,12 +11,15 @@ import (
 	"github.com/go-gost/core/hop"
 	"github.com/go-gost/core/limiter/traffic"
 	md "github.com/go-gost/core/metadata"
+	"github.com/go-gost/core/observer/stats"
 	"github.com/go-gost/core/recorder"
 	"github.com/go-gost/relay"
 	ctxvalue "github.com/go-gost/x/ctx"
 	limiter_util "github.com/go-gost/x/internal/util/limiter"
 	stats_util "github.com/go-gost/x/internal/util/stats"
+	tls_util "github.com/go-gost/x/internal/util/tls"
 	rate_limiter "github.com/go-gost/x/limiter/rate"
+	stats_wrapper "github.com/go-gost/x/observer/stats/wrapper"
 	xrecorder "github.com/go-gost/x/recorder"
 	"github.com/go-gost/x/registry"
 )
@@ -39,6 +42,7 @@ type relayHandler struct {
 	limiter  traffic.TrafficLimiter
 	cancel   context.CancelFunc
 	recorder recorder.RecorderObject
+	certPool tls_util.CertPool
 }
 
 func NewHandler(opts ...handler.Option) handler.Handler {
@@ -76,6 +80,10 @@ func (h *relayHandler) Init(md md.Metadata) (err error) {
 		}
 	}
 
+	if h.md.certificate != nil && h.md.privateKey != nil {
+		h.certPool = tls_util.NewMemoryCertPool()
+	}
+
 	return nil
 }
 
@@ -106,12 +114,19 @@ func (h *relayHandler) Handle(ctx context.Context, conn net.Conn, opts ...handle
 
 	log.Infof("%s <> %s", conn.RemoteAddr(), conn.LocalAddr())
 
+	pStats := stats.Stats{}
+	conn = stats_wrapper.WrapConn(conn, &pStats)
+
 	defer func() {
 		if err != nil {
 			ro.Err = err.Error()
 		}
+		ro.InputBytes = pStats.Get(stats.KindInputBytes)
+		ro.OutputBytes = pStats.Get(stats.KindOutputBytes)
 		ro.Duration = time.Since(start)
-		ro.Record(ctx, h.recorder.Recorder)
+		if err := ro.Record(ctx, h.recorder.Recorder); err != nil {
+			log.Errorf("record: %v", err)
+		}
 
 		log.WithFields(map[string]any{
 			"duration": time.Since(start),

@@ -4,10 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"strconv"
 	"time"
@@ -15,14 +15,16 @@ import (
 	"github.com/go-gost/core/handler"
 	"github.com/go-gost/core/logger"
 	md "github.com/go-gost/core/metadata"
+	"github.com/go-gost/core/observer/stats"
 	"github.com/go-gost/core/recorder"
 	xbypass "github.com/go-gost/x/bypass"
 	ctxvalue "github.com/go-gost/x/ctx"
-	xio "github.com/go-gost/x/internal/io"
-	netpkg "github.com/go-gost/x/internal/net"
+	xnet "github.com/go-gost/x/internal/net"
 	"github.com/go-gost/x/internal/util/sniffing"
 	sshd_util "github.com/go-gost/x/internal/util/sshd"
+	tls_util "github.com/go-gost/x/internal/util/tls"
 	rate_limiter "github.com/go-gost/x/limiter/rate"
+	stats_wrapper "github.com/go-gost/x/observer/stats/wrapper"
 	xrecorder "github.com/go-gost/x/recorder"
 	"github.com/go-gost/x/registry"
 	"golang.org/x/crypto/ssh"
@@ -41,6 +43,7 @@ type forwardHandler struct {
 	md       metadata
 	options  handler.Options
 	recorder recorder.RecorderObject
+	certPool tls_util.CertPool
 }
 
 func NewHandler(opts ...handler.Option) handler.Handler {
@@ -66,6 +69,10 @@ func (h *forwardHandler) Init(md md.Metadata) (err error) {
 		}
 	}
 
+	if h.md.certificate != nil && h.md.privateKey != nil {
+		h.certPool = tls_util.NewMemoryCertPool()
+	}
+
 	return nil
 }
 
@@ -89,14 +96,21 @@ func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...hand
 		"local":  conn.LocalAddr().String(),
 		"sid":    ctxvalue.SidFromContext(ctx),
 	})
-
 	log.Infof("%s <> %s", conn.RemoteAddr(), conn.LocalAddr())
+
+	pStats := stats.Stats{}
+	conn = stats_wrapper.WrapConn(conn, &pStats)
+
 	defer func() {
 		if err != nil {
 			ro.Err = err.Error()
 		}
+		ro.InputBytes = pStats.Get(stats.KindInputBytes)
+		ro.OutputBytes = pStats.Get(stats.KindOutputBytes)
 		ro.Duration = time.Since(start)
-		ro.Record(ctx, h.recorder.Recorder)
+		if err := ro.Record(ctx, h.recorder.Recorder); err != nil {
+			log.Errorf("record: %v", err)
+		}
 
 		log.WithFields(map[string]any{
 			"duration": time.Since(start),
@@ -143,7 +157,6 @@ func (h *forwardHandler) handleDirectForward(ctx context.Context, conn *sshd_uti
 	}
 	defer cc.Close()
 
-	var rw io.ReadWriter = conn
 	if h.md.sniffing {
 		if h.md.sniffingTimeout > 0 {
 			conn.SetReadDeadline(time.Now().Add(h.md.sniffingTimeout))
@@ -157,21 +170,44 @@ func (h *forwardHandler) handleDirectForward(ctx context.Context, conn *sshd_uti
 			conn.SetReadDeadline(time.Time{})
 		}
 
-		rw = xio.NewReadWriter(br, conn)
+		dial := func(ctx context.Context, network, address string) (net.Conn, error) {
+			return cc, nil
+		}
+		dialTLS := func(ctx context.Context, network, address string, cfg *tls.Config) (net.Conn, error) {
+			return cc, nil
+		}
+		sniffer := &sniffing.Sniffer{
+			Recorder:           h.recorder.Recorder,
+			RecorderOptions:    h.recorder.Options,
+			Certificate:        h.md.certificate,
+			PrivateKey:         h.md.privateKey,
+			NegotiatedProtocol: h.md.alpn,
+			CertPool:           h.certPool,
+			MitmBypass:         h.md.mitmBypass,
+			ReadTimeout:        h.md.readTimeout,
+		}
+
 		switch proto {
 		case sniffing.ProtoHTTP:
-			ro2 := &xrecorder.HandlerRecorderObject{}
-			*ro2 = *ro
-			ro.Time = time.Time{}
-			return h.handleHTTP(ctx, rw, cc, ro2, log)
+			return sniffer.HandleHTTP(ctx, xnet.NewReadWriteConn(br, conn, conn),
+				sniffing.WithDial(dial),
+				sniffing.WithDialTLS(dialTLS),
+				sniffing.WithRecorderObject(ro),
+				sniffing.WithLog(log),
+			)
 		case sniffing.ProtoTLS:
-			return h.handleTLS(ctx, rw, cc, ro, log)
+			return sniffer.HandleTLS(ctx, xnet.NewReadWriteConn(br, conn, conn),
+				sniffing.WithDial(dial),
+				sniffing.WithDialTLS(dialTLS),
+				sniffing.WithRecorderObject(ro),
+				sniffing.WithLog(log),
+			)
 		}
 	}
 
 	t := time.Now()
 	log.Infof("%s <-> %s", cc.LocalAddr(), targetAddr)
-	netpkg.Transport(rw, cc)
+	xnet.Transport(conn, cc)
 	log.WithFields(map[string]any{
 		"duration": time.Since(t),
 	}).Infof("%s >-< %s", cc.LocalAddr(), targetAddr)
@@ -270,7 +306,7 @@ func (h *forwardHandler) handleRemoteForward(ctx context.Context, conn *sshd_uti
 
 				t := time.Now()
 				log.Debugf("%s <-> %s", conn.LocalAddr(), conn.RemoteAddr())
-				netpkg.Transport(ch, conn)
+				xnet.Transport(ch, conn)
 				log.WithFields(map[string]any{
 					"duration": time.Since(t),
 				}).Debugf("%s >-< %s", conn.LocalAddr(), conn.RemoteAddr())

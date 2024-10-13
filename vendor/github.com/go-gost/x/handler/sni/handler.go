@@ -2,24 +2,25 @@ package sni
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"net"
 	"time"
 
 	"github.com/go-gost/core/handler"
 	md "github.com/go-gost/core/metadata"
+	"github.com/go-gost/core/observer/stats"
 	"github.com/go-gost/core/recorder"
 	ctxvalue "github.com/go-gost/x/ctx"
-	xio "github.com/go-gost/x/internal/io"
+	xnet "github.com/go-gost/x/internal/net"
 	"github.com/go-gost/x/internal/util/sniffing"
+	tls_util "github.com/go-gost/x/internal/util/tls"
 	rate_limiter "github.com/go-gost/x/limiter/rate"
+	stats_wrapper "github.com/go-gost/x/observer/stats/wrapper"
 	xrecorder "github.com/go-gost/x/recorder"
 	"github.com/go-gost/x/registry"
-)
-
-const (
-	defaultBodySize = 1024 * 1024 // 1MB
 )
 
 func init() {
@@ -30,6 +31,7 @@ type sniHandler struct {
 	md       metadata
 	options  handler.Options
 	recorder recorder.RecorderObject
+	certPool tls_util.CertPool
 }
 
 func NewHandler(opts ...handler.Option) handler.Handler {
@@ -57,6 +59,10 @@ func (h *sniHandler) Init(md md.Metadata) (err error) {
 		}
 	}
 
+	if h.md.certificate != nil && h.md.privateKey != nil {
+		h.certPool = tls_util.NewMemoryCertPool()
+	}
+
 	return nil
 }
 
@@ -82,15 +88,19 @@ func (h *sniHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler.
 	})
 
 	log.Infof("%s <> %s", conn.RemoteAddr(), conn.LocalAddr())
+
+	pStats := stats.Stats{}
+	conn = stats_wrapper.WrapConn(conn, &pStats)
+
 	defer func() {
-		if !ro.Time.IsZero() {
-			if err != nil {
-				ro.Err = err.Error()
-			}
-			ro.Duration = time.Since(start)
-			if err := ro.Record(ctx, h.recorder.Recorder); err != nil {
-				log.Errorf("record: %v", err)
-			}
+		if err != nil {
+			ro.Err = err.Error()
+		}
+		ro.InputBytes = pStats.Get(stats.KindInputBytes)
+		ro.OutputBytes = pStats.Get(stats.KindOutputBytes)
+		ro.Duration = time.Since(start)
+		if err := ro.Record(ctx, h.recorder.Recorder); err != nil {
+			log.Errorf("record: %v", err)
 		}
 
 		log.WithFields(map[string]any{
@@ -106,15 +116,51 @@ func (h *sniHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler.
 	proto, _ := sniffing.Sniff(ctx, br)
 	ro.Proto = proto
 
-	rw := xio.NewReadWriter(br, conn)
+	dial := func(ctx context.Context, network, address string) (net.Conn, error) {
+		var buf bytes.Buffer
+		cc, err := h.options.Router.Dial(ctxvalue.ContextWithBuffer(ctx, &buf), "tcp", address)
+		ro.Route = buf.String()
+		return cc, err
+	}
+	dialTLS := func(ctx context.Context, network, address string, cfg *tls.Config) (net.Conn, error) {
+		var buf bytes.Buffer
+		cc, err := h.options.Router.Dial(ctxvalue.ContextWithBuffer(ctx, &buf), "tcp", address)
+		ro.Route = buf.String()
+		if err != nil {
+			return nil, err
+		}
+		cc = tls.Client(cc, cfg)
+		return cc, nil
+	}
+
+	sniffer := &sniffing.Sniffer{
+		Recorder:           h.recorder.Recorder,
+		RecorderOptions:    h.recorder.Options,
+		Certificate:        h.md.certificate,
+		PrivateKey:         h.md.privateKey,
+		NegotiatedProtocol: h.md.alpn,
+		CertPool:           h.certPool,
+		MitmBypass:         h.md.mitmBypass,
+		ReadTimeout:        h.md.readTimeout,
+	}
+	conn = xnet.NewReadWriteConn(br, conn, conn)
 	switch proto {
 	case sniffing.ProtoHTTP:
-		ro2 := &xrecorder.HandlerRecorderObject{}
-		*ro2 = *ro
-		ro.Time = time.Time{}
-		return h.handleHTTP(ctx, rw, ro2, log)
+		return sniffer.HandleHTTP(ctx, conn,
+			sniffing.WithDial(dial),
+			sniffing.WithDialTLS(dialTLS),
+			sniffing.WithBypass(h.options.Bypass),
+			sniffing.WithRecorderObject(ro),
+			sniffing.WithLog(log),
+		)
 	case sniffing.ProtoTLS:
-		return h.handleTLS(ctx, rw, ro, log)
+		return sniffer.HandleTLS(ctx, conn,
+			sniffing.WithDial(dial),
+			sniffing.WithDialTLS(dialTLS),
+			sniffing.WithBypass(h.options.Bypass),
+			sniffing.WithRecorderObject(ro),
+			sniffing.WithLog(log),
+		)
 	default:
 		return errors.New("unknown traffic")
 	}
