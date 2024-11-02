@@ -23,8 +23,9 @@ import (
 
 func (h *socks5Handler) handleConnect(ctx context.Context, conn net.Conn, network, address string, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
 	log = log.WithFields(map[string]any{
-		"dst": fmt.Sprintf("%s/%s", address, network),
-		"cmd": "connect",
+		"dst":  fmt.Sprintf("%s/%s", address, network),
+		"cmd":  "connect",
+		"host": address,
 	})
 	log.Debugf("%s >> %s", conn.RemoteAddr(), address)
 
@@ -58,24 +59,28 @@ func (h *socks5Handler) handleConnect(ctx context.Context, conn net.Conn, networ
 		return err
 	}
 
-	clientID := ctxvalue.ClientIDFromContext(ctx)
-	rw := traffic_wrapper.WrapReadWriter(
-		h.limiter,
-		conn,
-		string(clientID),
-		limiter.ServiceOption(h.options.Service),
-		limiter.ScopeOption(limiter.ScopeClient),
-		limiter.NetworkOption(network),
-		limiter.AddrOption(address),
-		limiter.ClientOption(string(clientID)),
-		limiter.SrcOption(conn.RemoteAddr().String()),
-	)
-	if h.options.Observer != nil {
-		pstats := h.stats.Stats(string(clientID))
-		pstats.Add(stats.KindTotalConns, 1)
-		pstats.Add(stats.KindCurrentConns, 1)
-		defer pstats.Add(stats.KindCurrentConns, -1)
-		rw = stats_wrapper.WrapReadWriter(rw, pstats)
+	{
+		clientID := ctxvalue.ClientIDFromContext(ctx)
+		rw := traffic_wrapper.WrapReadWriter(
+			h.limiter,
+			conn,
+			string(clientID),
+			limiter.ServiceOption(h.options.Service),
+			limiter.ScopeOption(limiter.ScopeClient),
+			limiter.NetworkOption(network),
+			limiter.AddrOption(address),
+			limiter.ClientOption(string(clientID)),
+			limiter.SrcOption(conn.RemoteAddr().String()),
+		)
+		if h.options.Observer != nil {
+			pstats := h.stats.Stats(string(clientID))
+			pstats.Add(stats.KindTotalConns, 1)
+			pstats.Add(stats.KindCurrentConns, 1)
+			defer pstats.Add(stats.KindCurrentConns, -1)
+			rw = stats_wrapper.WrapReadWriter(rw, pstats)
+		}
+
+		conn = xnet.NewReadWriteConn(rw, rw, conn)
 	}
 
 	if h.md.sniffing {
@@ -83,7 +88,7 @@ func (h *socks5Handler) handleConnect(ctx context.Context, conn net.Conn, networ
 			conn.SetReadDeadline(time.Now().Add(h.md.sniffingTimeout))
 		}
 
-		br := bufio.NewReader(rw)
+		br := bufio.NewReader(conn)
 		proto, _ := sniffing.Sniff(ctx, br)
 		ro.Proto = proto
 
@@ -98,17 +103,19 @@ func (h *socks5Handler) handleConnect(ctx context.Context, conn net.Conn, networ
 			return cc, nil
 		}
 		sniffer := &sniffing.Sniffer{
-			Recorder:           h.recorder.Recorder,
-			RecorderOptions:    h.recorder.Options,
-			Certificate:        h.md.certificate,
-			PrivateKey:         h.md.privateKey,
-			NegotiatedProtocol: h.md.alpn,
-			CertPool:           h.certPool,
-			MitmBypass:         h.md.mitmBypass,
-			ReadTimeout:        h.md.readTimeout,
+			Websocket:           h.md.sniffingWebsocket,
+			WebsocketSampleRate: h.md.sniffingWebsocketSampleRate,
+			Recorder:            h.recorder.Recorder,
+			RecorderOptions:     h.recorder.Options,
+			Certificate:         h.md.certificate,
+			PrivateKey:          h.md.privateKey,
+			NegotiatedProtocol:  h.md.alpn,
+			CertPool:            h.certPool,
+			MitmBypass:          h.md.mitmBypass,
+			ReadTimeout:         h.md.readTimeout,
 		}
 
-		conn = xnet.NewReadWriteConn(br, rw, conn)
+		conn = xnet.NewReadWriteConn(br, conn, conn)
 		switch proto {
 		case sniffing.ProtoHTTP:
 			return sniffer.HandleHTTP(ctx, conn,
@@ -129,7 +136,7 @@ func (h *socks5Handler) handleConnect(ctx context.Context, conn net.Conn, networ
 
 	t := time.Now()
 	log.Infof("%s <-> %s", conn.RemoteAddr(), address)
-	xnet.Transport(rw, cc)
+	xnet.Transport(conn, cc)
 	log.WithFields(map[string]any{
 		"duration": time.Since(t),
 	}).Infof("%s >-< %s", conn.RemoteAddr(), address)

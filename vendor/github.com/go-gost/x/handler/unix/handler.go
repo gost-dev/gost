@@ -110,7 +110,9 @@ func (h *unixHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler
 		}
 
 		log.WithFields(map[string]any{
-			"duration": time.Since(start),
+			"duration":    time.Since(start),
+			"inputBytes":  ro.InputBytes,
+			"outputBytes": ro.OutputBytes,
 		}).Infof("%s >< %s", conn.RemoteAddr(), conn.LocalAddr())
 	}()
 
@@ -124,6 +126,7 @@ func (h *unixHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler
 		log = log.WithFields(map[string]any{
 			"node": target.Name,
 			"dst":  target.Addr,
+			"host": target.Addr,
 		})
 		ro.Host = target.Addr
 

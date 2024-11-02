@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"strconv"
 	"time"
 
@@ -32,6 +33,8 @@ var (
 	ErrTunnelID           = errors.New("invalid tunnel ID")
 	ErrTunnelNotAvailable = errors.New("tunnel not available")
 	ErrUnauthorized       = errors.New("unauthorized")
+	ErrTunnelRoute        = errors.New("no route to host")
+	ErrPrivateTunnel      = errors.New("private tunnel")
 )
 
 func init() {
@@ -76,8 +79,7 @@ func (h *tunnelHandler) Init(md md.Metadata) (err error) {
 	h.log = h.options.Logger.WithFields(map[string]any{
 		"node": h.id,
 	})
-
-	h.pool = NewConnectorPool(h.id, h.md.sd)
+	h.pool = NewConnectorPool(h.id)
 
 	h.ep = &entrypoint{
 		node:    h.id,
@@ -88,9 +90,14 @@ func (h *tunnelHandler) Init(md md.Metadata) (err error) {
 		log: h.log.WithFields(map[string]any{
 			"kind": "entrypoint",
 		}),
+		sniffingWebsocket:   h.md.sniffingWebsocket,
+		websocketSampleRate: h.md.sniffingWebsocketSampleRate,
 	}
-	if err = h.initEntrypoint(); err != nil {
-		return
+	h.ep.transport = &http.Transport{
+		DialContext:           h.ep.dial,
+		IdleConnTimeout:       30 * time.Second,
+		ResponseHeaderTimeout: h.md.entryPointReadTimeout,
+		DisableKeepAlives:     !h.md.entryPointKeepalive,
 	}
 
 	for _, ro := range h.options.Recorders {
@@ -98,6 +105,9 @@ func (h *tunnelHandler) Init(md md.Metadata) (err error) {
 			h.ep.recorder = ro
 			break
 		}
+	}
+	if err = h.initEntrypoint(); err != nil {
+		return
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

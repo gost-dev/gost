@@ -79,14 +79,21 @@ func (h *sniHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler.
 		Time:       start,
 		SID:        string(ctxvalue.SidFromContext(ctx)),
 	}
-	ro.ClientIP, _, _ = net.SplitHostPort(conn.RemoteAddr().String())
+
+	ro.ClientIP = conn.RemoteAddr().String()
+	if clientAddr := ctxvalue.ClientAddrFromContext(ctx); clientAddr != "" {
+		ro.ClientIP = string(clientAddr)
+	}
+	if h, _, _ := net.SplitHostPort(ro.ClientIP); h != "" {
+		ro.ClientIP = h
+	}
 
 	log := h.options.Logger.WithFields(map[string]any{
 		"remote": conn.RemoteAddr().String(),
 		"local":  conn.LocalAddr().String(),
 		"sid":    ctxvalue.SidFromContext(ctx),
+		"client": ro.ClientIP,
 	})
-
 	log.Infof("%s <> %s", conn.RemoteAddr(), conn.LocalAddr())
 
 	pStats := stats.Stats{}
@@ -104,7 +111,9 @@ func (h *sniHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler.
 		}
 
 		log.WithFields(map[string]any{
-			"duration": time.Since(start),
+			"duration":    time.Since(start),
+			"inputBytes":  ro.InputBytes,
+			"outputBytes": ro.OutputBytes,
 		}).Infof("%s >< %s", conn.RemoteAddr(), conn.LocalAddr())
 	}()
 
@@ -134,14 +143,16 @@ func (h *sniHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler.
 	}
 
 	sniffer := &sniffing.Sniffer{
-		Recorder:           h.recorder.Recorder,
-		RecorderOptions:    h.recorder.Options,
-		Certificate:        h.md.certificate,
-		PrivateKey:         h.md.privateKey,
-		NegotiatedProtocol: h.md.alpn,
-		CertPool:           h.certPool,
-		MitmBypass:         h.md.mitmBypass,
-		ReadTimeout:        h.md.readTimeout,
+		Websocket:           h.md.sniffingWebsocket,
+		WebsocketSampleRate: h.md.sniffingWebsocketSampleRate,
+		Recorder:            h.recorder.Recorder,
+		RecorderOptions:     h.recorder.Options,
+		Certificate:         h.md.certificate,
+		PrivateKey:          h.md.privateKey,
+		NegotiatedProtocol:  h.md.alpn,
+		CertPool:            h.certPool,
+		MitmBypass:          h.md.mitmBypass,
+		ReadTimeout:         h.md.readTimeout,
 	}
 	conn = xnet.NewReadWriteConn(br, conn, conn)
 	switch proto {

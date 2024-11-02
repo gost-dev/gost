@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"strconv"
 	"time"
@@ -15,13 +14,16 @@ import (
 	"github.com/go-gost/core/handler"
 	"github.com/go-gost/core/hop"
 	mdata "github.com/go-gost/core/metadata"
+	"github.com/go-gost/core/observer/stats"
 	"github.com/go-gost/core/recorder"
 	ctxvalue "github.com/go-gost/x/ctx"
-	xio "github.com/go-gost/x/internal/io"
 	xnet "github.com/go-gost/x/internal/net"
 	"github.com/go-gost/x/internal/net/proxyproto"
+	"github.com/go-gost/x/internal/util/forwarder"
 	"github.com/go-gost/x/internal/util/sniffing"
+	tls_util "github.com/go-gost/x/internal/util/tls"
 	rate_limiter "github.com/go-gost/x/limiter/rate"
+	stats_wrapper "github.com/go-gost/x/observer/stats/wrapper"
 	xrecorder "github.com/go-gost/x/recorder"
 	"github.com/go-gost/x/registry"
 )
@@ -36,6 +38,7 @@ type forwardHandler struct {
 	md       metadata
 	options  handler.Options
 	recorder recorder.RecorderObject
+	certPool tls_util.CertPool
 }
 
 func NewHandler(opts ...handler.Option) handler.Handler {
@@ -61,6 +64,10 @@ func (h *forwardHandler) Init(md mdata.Metadata) (err error) {
 		}
 	}
 
+	if h.md.certificate != nil && h.md.privateKey != nil {
+		h.certPool = tls_util.NewMemoryCertPool()
+	}
+
 	return
 }
 
@@ -78,33 +85,26 @@ func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...hand
 		Service:    h.options.Service,
 		RemoteAddr: conn.RemoteAddr().String(),
 		LocalAddr:  conn.LocalAddr().String(),
+		Network:    "tcp",
 		Time:       start,
 		SID:        string(ctxvalue.SidFromContext(ctx)),
 	}
-	ro.ClientIP, _, _ = net.SplitHostPort(conn.RemoteAddr().String())
+
+	ro.ClientIP = conn.RemoteAddr().String()
+	if clientAddr := ctxvalue.ClientAddrFromContext(ctx); clientAddr != "" {
+		ro.ClientIP = string(clientAddr)
+	}
+	if h, _, _ := net.SplitHostPort(ro.ClientIP); h != "" {
+		ro.ClientIP = h
+	}
 
 	log := h.options.Logger.WithFields(map[string]any{
 		"remote": conn.RemoteAddr().String(),
 		"local":  conn.LocalAddr().String(),
 		"sid":    ctxvalue.SidFromContext(ctx),
+		"client": ro.ClientIP,
 	})
-
 	log.Infof("%s <> %s", conn.RemoteAddr(), conn.LocalAddr())
-	defer func() {
-		if err != nil {
-			ro.Err = err.Error()
-		}
-		ro.Duration = time.Since(start)
-		ro.Record(ctx, h.recorder.Recorder)
-
-		log.WithFields(map[string]any{
-			"duration": time.Since(start),
-		}).Infof("%s >< %s", conn.RemoteAddr(), conn.LocalAddr())
-	}()
-
-	if !h.checkRateLimit(conn.RemoteAddr()) {
-		return rate_limiter.ErrRateLimit
-	}
 
 	network := "tcp"
 	if _, ok := conn.(net.PacketConn); ok {
@@ -112,7 +112,31 @@ func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...hand
 	}
 	ro.Network = network
 
-	var rw io.ReadWriter = conn
+	pStats := stats.Stats{}
+	conn = stats_wrapper.WrapConn(conn, &pStats)
+
+	defer func() {
+		if err != nil {
+			ro.Err = err.Error()
+		}
+		ro.InputBytes = pStats.Get(stats.KindInputBytes)
+		ro.OutputBytes = pStats.Get(stats.KindOutputBytes)
+		ro.Duration = time.Since(start)
+		if err := ro.Record(ctx, h.recorder.Recorder); err != nil {
+			log.Errorf("record: %v", err)
+		}
+
+		log.WithFields(map[string]any{
+			"duration":    time.Since(start),
+			"inputBytes":  ro.InputBytes,
+			"outputBytes": ro.OutputBytes,
+		}).Infof("%s >< %s", conn.RemoteAddr(), conn.LocalAddr())
+	}()
+
+	if !h.checkRateLimit(conn.RemoteAddr()) {
+		return rate_limiter.ErrRateLimit
+	}
+
 	var proto string
 	if network == "tcp" && h.md.sniffing {
 		if h.md.sniffingTimeout > 0 {
@@ -127,15 +151,44 @@ func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...hand
 			conn.SetReadDeadline(time.Time{})
 		}
 
-		rw = xio.NewReadWriter(br, conn)
+		dial := func(ctx context.Context, network, address string) (net.Conn, error) {
+			var buf bytes.Buffer
+			cc, err := h.options.Router.Dial(ctxvalue.ContextWithBuffer(ctx, &buf), "tcp", address)
+			ro.Route = buf.String()
+			return cc, err
+		}
+		sniffer := &forwarder.Sniffer{
+			Websocket:           h.md.sniffingWebsocket,
+			WebsocketSampleRate: h.md.sniffingWebsocketSampleRate,
+			Recorder:            h.recorder.Recorder,
+			RecorderOptions:     h.recorder.Options,
+			Certificate:         h.md.certificate,
+			PrivateKey:          h.md.privateKey,
+			NegotiatedProtocol:  h.md.alpn,
+			CertPool:            h.certPool,
+			MitmBypass:          h.md.mitmBypass,
+			ReadTimeout:         h.md.readTimeout,
+		}
+
+		conn = xnet.NewReadWriteConn(br, conn, conn)
 		switch proto {
 		case sniffing.ProtoHTTP:
-			ro2 := &xrecorder.HandlerRecorderObject{}
-			*ro2 = *ro
-			ro.Time = time.Time{}
-			return h.handleHTTP(ctx, rw, ro2, log)
+			return sniffer.HandleHTTP(ctx, conn,
+				forwarder.WithDial(dial),
+				forwarder.WithHop(h.hop),
+				forwarder.WithBypass(h.options.Bypass),
+				forwarder.WithHTTPKeepalive(h.md.httpKeepalive),
+				forwarder.WithRecorderObject(ro),
+				forwarder.WithLog(log),
+			)
 		case sniffing.ProtoTLS:
-			return h.handleTLS(ctx, xnet.NewReadWriteConn(rw, rw, conn), ro, log)
+			return sniffer.HandleTLS(ctx, conn,
+				forwarder.WithDial(dial),
+				forwarder.WithHop(h.hop),
+				forwarder.WithBypass(h.options.Bypass),
+				forwarder.WithRecorderObject(ro),
+				forwarder.WithLog(log),
+			)
 		}
 	}
 
@@ -190,7 +243,7 @@ func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...hand
 
 	t := time.Now()
 	log.Infof("%s <-> %s", conn.RemoteAddr(), target.Addr)
-	xnet.Transport(rw, cc)
+	xnet.Transport(conn, cc)
 	log.WithFields(map[string]any{
 		"duration": time.Since(t),
 	}).Infof("%s >-< %s", conn.RemoteAddr(), target.Addr)
