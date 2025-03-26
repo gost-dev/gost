@@ -15,17 +15,20 @@ jobs:
   goreleaser:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout@v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
       - run: git fetch --force --tags
-      - uses: actions/setup-go@v5
+      # actions/setup-go@v5.4.0
+      - uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b
         with:
           go-version: '1.23'
           cache: true
       # More assembly might be required: Docker logins, GPG, etc. It all depends
       # on your needs.
-      - uses: goreleaser/goreleaser-action@v6
+      # goreleaser/goreleaser-action@v6.2.1
+      - uses: goreleaser/goreleaser-action@90a3faa9d0182683851fbfa97ca1a2cb983bfca3
         with:
           # either 'goreleaser' (default) or 'goreleaser-pro':
           distribution: goreleaser
