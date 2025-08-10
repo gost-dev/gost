@@ -2,8 +2,8 @@ name: Trigger nightly build
 
 on:
   # schedule:
-    # * is a special character in YAML, so you have to quote this string
-    # - cron:  '30 15 * * *'
+  # * is a special character in YAML, so you have to quote this string
+  # - cron:  '00 15 * * *'
   workflow_dispatch:
 
 jobs:
@@ -28,14 +28,12 @@ jobs:
     name: Push tag for nightly build
     runs-on: ubuntu-latest
     steps:
-      -
-        name: 'Checkout'
+      - name: "Checkout"
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.NIGHTLY_BUILD_GH_TOKEN }}
           fetch-depth: 0
-      -
-        name: 'Push new tag'
+      - name: "Push new tag"
         run: |
           git config user.name "${GITHUB_ACTOR}"
           git config user.email "${GITHUB_ACTOR}@users.noreply.github.com"
@@ -51,7 +49,7 @@ jobs:
           TAG="${MAJOR_VERSION}.${MINOR_VERSION}.${PATCH_VERSION}-nightly.$(date +'%Y%m%d')"
           git tag -a $TAG -m "$TAG: nightly build"
           git push origin $TAG
-      - name: 'Clean up nightly releases'
+      - name: "Clean up nightly releases"
         uses: dev-drprasad/delete-older-releases@v0.3.3
         with:
           keep_latest: 2
