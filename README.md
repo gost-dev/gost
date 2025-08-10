@@ -13,7 +13,7 @@
 - [x] [反向代理](https://gost.run/tutorials/reverse-proxy/)和[隧道](https://gost.run/tutorials/reverse-proxy-tunnel/)
 - [x] [TCP/UDP透明代理](https://gost.run/tutorials/redirect/)
 - [x] DNS[解析](https://gost.run/concepts/resolver/)和[代理](https://gost.run/tutorials/dns/)
-- [x] [TUN/TAP设备](https://gost.run/tutorials/tuntap/)
+- [x] [TUN/TAP设备](https://gost.run/tutorials/tuntap/)与[TUN2SOCKS](https://gost.run/tutorials/tungo/)
 - [x] [负载均衡](https://gost.run/concepts/selector/)
 - [x] [路由控制](https://gost.run/concepts/bypass/)
 - [x] [准入控制](https://gost.run/concepts/admission/)
@@ -91,7 +91,7 @@ docker run --rm gogost/gost -V
 
 ### Shadowsocks Android插件
 
-[xausky/ShadowsocksGostPlugin](https://github.com/xausky/ShadowsocksGostPlugin)
+[hamid-nazari/ShadowsocksGostPlugin](https://github.com/hamid-nazari/ShadowsocksGostPlugin)
 
 ## 帮助与支持
 

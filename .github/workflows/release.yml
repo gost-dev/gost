@@ -23,8 +23,12 @@ jobs:
       # actions/setup-go@v5.4.0
       - uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b
         with:
-          go-version: '1.23'
+          go-version: '1.24'
           cache: true
+      - name: Install UPX
+        uses: crazy-max/ghaction-upx@v3
+        with:
+          install-only: true
       # More assembly might be required: Docker logins, GPG, etc. It all depends
       # on your needs.
       # goreleaser/goreleaser-action@v6.2.1
