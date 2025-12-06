@@ -122,6 +122,5 @@ merge-master:
 	git merge origin/master --no-commit
 
 before-build:
-	go mod vendor
 	go mod tidy
 	go vet ./...
