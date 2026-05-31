@@ -6,6 +6,7 @@ import (
 	_ "github.com/go-gost/x/connector/forward"
 	_ "github.com/go-gost/x/connector/http"
 	_ "github.com/go-gost/x/connector/http2"
+	_ "github.com/go-gost/x/connector/masque"
 	_ "github.com/go-gost/x/connector/relay"
 	_ "github.com/go-gost/x/connector/router"
 	_ "github.com/go-gost/x/connector/serial"
@@ -18,6 +19,7 @@ import (
 	_ "github.com/go-gost/x/connector/tcp"
 	_ "github.com/go-gost/x/connector/tunnel"
 	_ "github.com/go-gost/x/connector/unix"
+	_ "github.com/go-gost/x/connector/masque"
 
 	// Register dialers
 	_ "github.com/go-gost/x/dialer/direct"
@@ -27,6 +29,7 @@ import (
 	_ "github.com/go-gost/x/dialer/http2"
 	_ "github.com/go-gost/x/dialer/http2/h2"
 	_ "github.com/go-gost/x/dialer/http3"
+	_ "github.com/go-gost/x/dialer/http3/masque"
 	_ "github.com/go-gost/x/dialer/http3/wt"
 	_ "github.com/go-gost/x/dialer/icmp"
 	_ "github.com/go-gost/x/dialer/kcp"
@@ -56,6 +59,7 @@ import (
 	_ "github.com/go-gost/x/handler/http"
 	_ "github.com/go-gost/x/handler/http2"
 	_ "github.com/go-gost/x/handler/http3"
+	_ "github.com/go-gost/x/handler/masque"
 	_ "github.com/go-gost/x/handler/metrics"
 	_ "github.com/go-gost/x/handler/redirect/tcp"
 	_ "github.com/go-gost/x/handler/redirect/udp"

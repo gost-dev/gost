@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Check Root User
 
@@ -42,7 +42,7 @@ install_gost() {
     armv7*)
         cpu_arch="armv7"
         ;;
-    aarch64)
+    aarch64|arm64)
         cpu_arch="arm64"
         ;;
     i686)
@@ -66,23 +66,22 @@ install_gost() {
         ;;
     esac
     get_download_url="$base_url/tags/$version"
-    download_url=$(curl -s "$get_download_url" | grep -Eo "\"browser_download_url\": \".*${os}.*${cpu_arch}.*\"" | awk -F'["]' '{print $4}')
+    download_url=$(curl -s "$get_download_url" | awk -F'"' -v re=".*${os}.*${cpu_arch}.*" '/"browser_download_url":/ && $4 ~ re { print $4 }' | head -n 1)
 
-    # Download the binary
-    echo "Downloading gost version $version..."
-    curl -fsSL -o gost.tar.gz $download_url
+    # Download and install the binary
+    install_path="/usr/local/bin"
+    echo "Downloading and installing gost version $version..."
+    curl -fsSL "$download_url" | tar -xzC "$install_path" gost
+    chmod +x "$install_path/gost"
 
-    # Extract and install the binary
-    echo "Installing gost..."
-    tar -xzf gost.tar.gz
-    chmod +x gost
-    mv gost /usr/local/bin/gost
+    # Remove binary from macOS quarantine when installing for first time
+    [[ "$os" == "darwin" ]] && { xattr -d com.apple.quarantine "$install_path/gost" 2>&-; }
 
     echo "gost installation completed!"
 }
 
 # Retrieve available versions from GitHub API
-versions=$(curl -s "$base_url" | grep -oP 'tag_name": "\K[^"]+')
+versions=$(curl -s "$base_url" | awk -F'"' '/"tag_name":/ {print $4}')
 
 # Check if --install option provided
 if [[ "$1" == "--install" ]]; then
