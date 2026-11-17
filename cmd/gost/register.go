@@ -27,7 +27,8 @@ import (
 	_ "github.com/go-gost/x/dialer/http2"
 	_ "github.com/go-gost/x/dialer/http2/h2"
 	_ "github.com/go-gost/x/dialer/http3"
-	_ "github.com/go-gost/x/dialer/http3/wt"
+
+	// _ "github.com/go-gost/x/dialer/http3/wt"
 	_ "github.com/go-gost/x/dialer/icmp"
 	_ "github.com/go-gost/x/dialer/kcp"
 	_ "github.com/go-gost/x/dialer/mtcp"
@@ -83,7 +84,8 @@ import (
 	_ "github.com/go-gost/x/listener/http2/h2"
 	_ "github.com/go-gost/x/listener/http3"
 	_ "github.com/go-gost/x/listener/http3/h3"
-	_ "github.com/go-gost/x/listener/http3/wt"
+
+	// _ "github.com/go-gost/x/listener/http3/wt"
 	_ "github.com/go-gost/x/listener/icmp"
 	_ "github.com/go-gost/x/listener/kcp"
 	_ "github.com/go-gost/x/listener/mtcp"
